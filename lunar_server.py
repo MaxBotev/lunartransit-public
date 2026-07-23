@@ -61,6 +61,7 @@ DEFAULTS = {
     "home_lat": 37.6213, "home_lon": -122.3790, "home_alt_m": 4.0,
     "web_port": 8080,
     "adsb_source": "http://raspberrypi.local:8080/api/adsb/raw",
+    "adsb_poll_interval_s": 1.0,    # raise this for shared public feeds (adsb.lol etc.)
     "dump1090_path": "",            # set when a local dongle arrives
     "lunar_enabled": True, "lunar_margin_deg": 0.10, "lunar_watch_deg": 2.0,
     "lunar_min_elev_deg": 10.0,
@@ -150,12 +151,20 @@ def fetch_raw_adsb(cfg):
     src = cfg["adsb_source"]
     if src.startswith("https"):
         with urllib.request.urlopen(src, timeout=4, context=SSL_CTX) as r:
-            return json.loads(r.read())
-    if src.startswith("http"):
+            data = json.loads(r.read())
+    elif src.startswith("http"):
         with urllib.request.urlopen(src, timeout=4) as r:
-            return json.loads(r.read())
-    with open(src) as f:                      # local file path (dump1090 dir)
-        return json.load(f)
+            data = json.loads(r.read())
+    else:
+        with open(src) as f:                  # local file path (dump1090 dir)
+            data = json.load(f)
+    if "aircraft" not in data and "ac" in data:
+        # adsb.lol / airplanes.live "point" API: same per-plane fields
+        # (lat/lon/alt_baro/gs/track/hex/flight/...) under "ac" instead of
+        # "aircraft", no top-level "messages".
+        data["aircraft"] = data.pop("ac") or []
+        data.setdefault("messages", 0)
+    return data
 
 
 def reload_config_if_changed(state):
@@ -278,7 +287,7 @@ def adsb_worker(state):
         except Exception as e:
             with state.lock:
                 state.adsb_stats = {"error": str(e), "aircraft": 0}
-        time.sleep(1.0)
+        time.sleep(cfg.get("adsb_poll_interval_s", 1.0))
 
 
 # ---------------------------------------------------------------------------
