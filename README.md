@@ -34,6 +34,13 @@ elevation, with tracked traffic on the slab below.</em></p>
 Alerts and capture are **opt-in and off by default**. With no configuration
 beyond your location, you get the dashboard and predictions.
 
+Click any aircraft for its live detail panel — type, altitude, speed, track, and
+the route/operator resolved from its callsign:
+
+![Top-down 3D view with labelled traffic; the selected aircraft's panel shows a
+Boeing 737NG at 27,325 ft, 431 kt, tracking 134°, on the Oakland (OAK) to Palm
+Springs (PSP) route.](docs/img/adsb3d-detail-panel.png)
+
 ## How it works
 
 ```
