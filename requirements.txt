@@ -1,0 +1,6 @@
+# LunarTransit predictor + dashboard
+Flask>=3.0
+numpy>=1.26
+skyfield>=1.45
+# TLS on fresh Windows Python installs (harmless elsewhere)
+certifi

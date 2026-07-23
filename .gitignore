@@ -1,0 +1,18 @@
+# --- machine-local state: never commit ---
+config.json
+*.log
+*.db
+*.db-wal
+*.db-shm
+route_cache.json
+lunar_events.jsonl
+de421.bsp
+terrain_cache/
+adsb_spool/
+adsb_local/
+tle_cache/
+
+# --- python / os noise ---
+__pycache__/
+*.pyc
+.DS_Store
