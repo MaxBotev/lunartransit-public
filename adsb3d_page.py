@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 MaxBotev
 """HTML/JS for the 3D ADS-B terrain-plate view (served at /adsb3d).
 
 A ~100-mile-diameter circular slab of real terrain (AWS Terrarium DEM via the

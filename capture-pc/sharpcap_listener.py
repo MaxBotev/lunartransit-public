@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 MaxBotev
 # SharpCap Pro capture-trigger listener.
 #
 # Run this inside SharpCap Pro:  Scripting > Show Console  >  open & run this file

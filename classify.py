@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 MaxBotev
 """
 Classify an ADS-B contact into a display category for the map.
 

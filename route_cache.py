@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 MaxBotev
 """
 Aircraft enrichment with on-disk caching, filled by a background worker so the
 UI never blocks.

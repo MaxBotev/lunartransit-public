@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 MaxBotev
 """HTML/JS for the LunarTransit predictor page (served at /lunar)."""
 
 LUNAR_HTML = r"""<!DOCTYPE html>

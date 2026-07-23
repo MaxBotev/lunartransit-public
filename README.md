@@ -207,7 +207,29 @@ Machine-local files (`config.json`, `de421.bsp`, caches, logs) are git-ignored.
 
 ## License
 
-Released under the MIT License — see [LICENSE](LICENSE).
+Copyright (C) 2026 MaxBotev.
+
+Licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0) — see
+[LICENSE](LICENSE). This is a strong copyleft license: you may use, modify, and
+redistribute this software, but any derivative you distribute **or run as a
+network service** must be released in full source under the same license. It
+cannot be incorporated into closed-source or proprietary products.
+
+    LunarTransit — aircraft/Moon transit predictor
+    Copyright (C) 2026 MaxBotev
+
+    This program is free software: you can redistribute it and/or modify it
+    under the terms of the GNU Affero General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or (at your
+    option) any later version.
+
+    This program is distributed in the hope that it will be useful, but
+    WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+    License for more details.
+
+    You should have received a copy of the GNU Affero General Public License
+    along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ## Acknowledgements
 
