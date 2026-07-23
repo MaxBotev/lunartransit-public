@@ -10,7 +10,18 @@ your exact location. It ships a live web dashboard, an optional Telegram alert,
 and an optional TCP trigger that starts a high-frame-rate recording in
 [SharpCap](https://www.sharpcap.co.uk/) so you never miss the frame.
 
-<!-- Add a screenshot of the /lunar or /adsb3d dashboard here. -->
+![The 3D sky view: live aircraft with climb/descent trails over shaded terrain,
+and the Moon's true az/el direction drawn as a sight-tube from the observing
+site — anything crossing that line is a transit candidate.](docs/img/adsb3d-sightline.png)
+
+<p align="center"><em>Live aircraft over the terrain slab, with the sight-tube
+running from the observer to the Moon.</em></p>
+
+![Wide view of the full 100-mile slab tilted toward the horizon, with the Moon
+rendered at its true elevation and phase (11% illuminated, 12° elevation).](docs/img/adsb3d-moon-wide.png)
+
+<p align="center"><em>Wide view — the Moon rendered at its true phase and
+elevation, with tracked traffic on the slab below.</em></p>
 
 ## What you get
 
