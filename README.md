@@ -170,21 +170,43 @@ machine. You can also change the site live from the dashboard (📍 SITE control
 | `telegram_bot_token` | `""` | From [@BotFather](https://t.me/BotFather). **Never commit — it stays in the git-ignored `config.json`.** |
 | `telegram_chat_id` | `""` | Your chat id (e.g. via @userinfobot). |
 
-### Two-host setup: Pi receives, PC captures
+### Two-host setups
 
-The most reliable split puts the dongle on an always-on Pi and the camera work
-on the capture PC:
+With the dongle on an always-on Pi and the camera on a capture PC, there are two
+sensible arrangements. **Whichever you pick, exactly one host must own capture
+and Telegram** — otherwise you get double recordings and duplicate alerts.
+
+**A. Pi-only server (simplest).** The Pi does everything; the PC runs nothing but
+SharpCap and the listener script. Best if you want the capture PC quiet, or it's
+busy driving the camera:
 
 ```
-   Pi (dongle + dump1090)                  Windows PC (camera + SharpCap)
+   Pi (dongle + engine + alerts)           Windows PC (SharpCap only)
+   ├ adsb_source: local aircraft.json      └ sharpcap_listener.py in SharpCap's
+   ├ telegram_enabled: true                   script console (listens on :5580)
+   ├ capture_enabled: true
+   └ capture_host: <pc>.local  ─────────►  REC / STOP over TCP
+```
+
+The PC needs an inbound firewall rule for TCP 5580:
+
+```powershell
+netsh advfirewall firewall add rule name="LunarTransit trigger" dir=in action=allow protocol=TCP localport=5580
+```
+
+*Note:* with the listener not running, a connection test to 5580 **times out**
+rather than being refused — Windows Firewall silently drops packets to closed
+ports. That's normal and doesn't mean the path is broken.
+
+**B. Split roles.** The PC runs its own server against the Pi's feed and triggers
+capture locally, so the REC command never crosses the network:
+
+```
+   Pi (dongle + dump1090)                  Windows PC (server + camera)
    ├ serves /api/adsb/raw  ────────────►   ├ adsb_source: http://<pi>:8080/api/adsb/raw
    ├ capture_enabled: false                ├ capture_enabled: true
    └ telegram_enabled: true                └ capture_host: 127.0.0.1
 ```
-
-Run the **capture trigger on the PC** (`capture_host` `127.0.0.1`, so the REC
-command never crosses the network) and keep **Telegram on one host only** —
-otherwise you get duplicate alerts and double recordings.
 
 ### Surviving DHCP: use hostnames, not IPs
 
