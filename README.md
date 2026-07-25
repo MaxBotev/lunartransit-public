@@ -157,6 +157,7 @@ machine. You can also change the site live from the dashboard (📍 SITE control
 | `home_alt_m` | `4` | Observer altitude (metres). |
 | `web_port` | `8080` | Dashboard port. |
 | `adsb_source` | Pi URL | A local `aircraft.json` path, or an `http(s)://…/api/adsb/raw` feed. |
+| `adsb_source_fallbacks` | `[]` | Extra sources tried in order if the primary fails — see [Surviving DHCP](#surviving-dhcp-use-hostnames-not-ips). |
 | `lunar_min_elev_deg` | `10` | Ignore the Moon below this elevation. |
 | `lunar_margin_deg` | `0.10` | Extra margin beyond the Moon's radius counted as a transit. |
 | `lunar_watch_deg` | `2.0` | "Near miss" heads-up zone (degrees). |
@@ -168,6 +169,46 @@ machine. You can also change the site live from the dashboard (📍 SITE control
 | `telegram_enabled` | `false` | Master switch for Telegram alerts. |
 | `telegram_bot_token` | `""` | From [@BotFather](https://t.me/BotFather). **Never commit — it stays in the git-ignored `config.json`.** |
 | `telegram_chat_id` | `""` | Your chat id (e.g. via @userinfobot). |
+
+### Two-host setup: Pi receives, PC captures
+
+The most reliable split puts the dongle on an always-on Pi and the camera work
+on the capture PC:
+
+```
+   Pi (dongle + dump1090)                  Windows PC (camera + SharpCap)
+   ├ serves /api/adsb/raw  ────────────►   ├ adsb_source: http://<pi>:8080/api/adsb/raw
+   ├ capture_enabled: false                ├ capture_enabled: true
+   └ telegram_enabled: true                └ capture_host: 127.0.0.1
+```
+
+Run the **capture trigger on the PC** (`capture_host` `127.0.0.1`, so the REC
+command never crosses the network) and keep **Telegram on one host only** —
+otherwise you get duplicate alerts and double recordings.
+
+### Surviving DHCP: use hostnames, not IPs
+
+If your router hands out addresses by DHCP, a reboot can renumber either
+machine and a hard-coded IP in `adsb_source` will silently stop working. Use
+the hostname instead, and list alternates as fallbacks:
+
+```json
+{
+  "adsb_source": "http://sky.local:8080/api/adsb/raw",
+  "adsb_source_fallbacks": [
+    "http://sky:8080/api/adsb/raw",
+    "http://192.168.1.42:8080/api/adsb/raw"
+  ]
+}
+```
+
+They're tried in order and the one that answers is remembered, so the normal
+case costs a single request. `.local` names are mDNS: they work out of the box
+on the Pi (Avahi) and on Windows 10/11, which resolves `.local` natively. The
+bare hostname (`http://sky:8080/…`) is a useful second string via NetBIOS/DNS
+suffix, and a literal IP makes a reasonable last resort.
+
+Check resolution from either machine with `ping sky.local`.
 
 ### Local horizon (optional)
 
@@ -194,6 +235,30 @@ at T−`capture_pre_s` and `STOP` at T+`capture_post_s` around each predicted
 transit.
 
 ---
+
+## Prediction accuracy
+
+The lunar disc is only **0.52° across**, so small pointing errors decide whether
+a transit is called at all. Two effects dominate, and both are handled:
+
+- **Report latency.** An ADS-B position is already 1–2 s old when it arrives.
+  At 250 m/s that is 250–500 m of along-track error — about 1–2° at 15 km slant
+  range, i.e. *several lunar diameters*. Every contact is therefore advanced by
+  its own measured lag (file age + `seen_pos`) before projection.
+- **Sampling resolution.** Trajectories are sampled at 1 s, but a plane at 8 km
+  crosses the entire disc in 0.29 s. Taking the smallest sample as the closest
+  approach overestimates it by up to `ω·Δt/2`, which turns real hits into
+  apparent misses. Because `sep²` is exactly parabolic in time for a straight
+  pass, the true minimum and its timing are recovered by fitting a parabola to
+  the three samples around the minimum — exact to <0.001° with no extra compute.
+
+Remaining error sources are an order of magnitude smaller: barometric altitude
+for contacts without `alt_geom` (flagged as low-confidence in alerts), and
+dead-reckoning curvature (~0.01° at the moment of decision). Both sit inside the
+default 0.10° margin.
+
+Predictions are suspended entirely if the ADS-B feed goes stale (>15 s), so a
+dead receiver can't arm a capture on frozen positions.
 
 ## Running manually
 

@@ -60,7 +60,10 @@ DEFAULTS = {
     # config.json or via the 📍 SITE control in the dashboard.
     "home_lat": 37.6213, "home_lon": -122.3790, "home_alt_m": 4.0,
     "web_port": 8080,
+    # Prefer hostnames over IPs so DHCP reassignments don't break the link.
+    # adsb_source_fallbacks is tried in order when the primary fails.
     "adsb_source": "http://raspberrypi.local:8080/api/adsb/raw",
+    "adsb_source_fallbacks": [],
     "dump1090_path": "",            # set when a local dongle arrives
     "lunar_enabled": True, "lunar_margin_deg": 0.10, "lunar_watch_deg": 2.0,
     "lunar_min_elev_deg": 10.0,
@@ -145,9 +148,8 @@ class State:
             }
 
 
-def fetch_raw_adsb(cfg):
-    """Raw dump1090-format aircraft.json from the configured source."""
-    src = cfg["adsb_source"]
+def _fetch_one(src):
+    """Fetch aircraft.json from a single URL or local path."""
     if src.startswith("https"):
         with urllib.request.urlopen(src, timeout=4, context=SSL_CTX) as r:
             return json.loads(r.read())
@@ -156,6 +158,37 @@ def fetch_raw_adsb(cfg):
             return json.loads(r.read())
     with open(src) as f:                      # local file path (dump1090 dir)
         return json.load(f)
+
+
+_last_good_source = {"src": None}
+
+
+def fetch_raw_adsb(cfg):
+    """Raw dump1090-format aircraft.json from the configured source.
+
+    Tries adsb_source first, then each entry of adsb_source_fallbacks. This is
+    what makes a DHCP setup survive a reboot: list the hostname forms your
+    network actually resolves (mDNS "sky.local", bare NetBIOS "sky", and a
+    last-resort literal IP) and whichever answers wins. The working source is
+    remembered and tried first next time, so the common case is one request.
+    """
+    candidates = [cfg["adsb_source"]] + list(cfg.get("adsb_source_fallbacks") or [])
+    last = _last_good_source["src"]
+    if last in candidates:                     # prefer whatever worked before
+        candidates.insert(0, candidates.pop(candidates.index(last)))
+    errors = []
+    for src in candidates:
+        if not src:
+            continue
+        try:
+            data = _fetch_one(src)
+            if _last_good_source["src"] != src:
+                print("[adsb] source: %s" % src, flush=True)
+                _last_good_source["src"] = src
+            return data
+        except Exception as e:
+            errors.append("%s: %s" % (src, e))
+    raise RuntimeError("no ADS-B source reachable — " + "; ".join(errors))
 
 
 def reload_config_if_changed(state):

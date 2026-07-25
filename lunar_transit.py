@@ -3,12 +3,14 @@
 """
 LunarTransit — aircraft/Moon transit prediction engine.
 
-Runs as a background thread inside the UFO Monitor process. Every second it:
-  1. reads live aircraft from dump1090's aircraft.json (/dev/shm/ufo_adsb),
-  2. projects each trajectory forward ~90 s (great-circle at current gs/track,
-     plus baro climb rate),
+Runs as a background thread inside the server process. Every second it:
+  1. reads live aircraft from dump1090's aircraft.json,
+  2. projects each trajectory forward ~90 s (equirectangular dead-reckoning at
+     current gs/track with local radii of curvature, plus climb rate),
+     compensating each report for its own measurement latency,
   3. computes topocentric az/el for the aircraft (WGS-84 ECEF -> ENU) and the
-     Moon (Skyfield, DE421), and the angular separation between them,
+     Moon (Skyfield, DE421), and the angular separation between them, refining
+     the closest approach to sub-sample precision with a parabolic vertex fit,
   4. fires a Telegram alert when a transit (or near miss) is predicted, and
   5. arms a TCP capture trigger: "REC\n" at T-pre and "STOP\n" at T+post to the
      SharpCap listener on the capture PC. No human in the loop.
@@ -50,8 +52,12 @@ WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 KT_TO_MS = 0.514444
 FT_TO_M = 0.3048
 HORIZON_S = 90          # how far ahead to project trajectories
-STEP_S = 1.0            # projection step
+STEP_S = 1.0            # projection step (closest approach is refined to
+                        # sub-sample precision, so this stays coarse — see
+                        # refine_min_sep)
 PATH_ZONE_DEG = 3.0     # include sky-path polyline for aircraft this close
+MAX_FEED_AGE_S = 15.0   # refuse to predict on an ADS-B feed staler than this
+MAX_REPORT_LAG_S = 15.0 # drop individual contacts whose fix is older than this
 
 def load_horizon(path):
     """NINA custom-horizon file: 'azimuth altitude' pairs, # comments."""
@@ -87,6 +93,11 @@ def horizon_alt_at(pts, az):
 
 
 DEFAULTS = {
+    # NOTE: home_alt_m is height above the WGS-84 ELLIPSOID (HAE), matching
+    # ADS-B alt_geom. Map and phone-GPS elevations are usually MSL/orthometric;
+    # the difference (geoid undulation) is about -32 m in the SF Bay Area,
+    # which is a systematic ~0.09 deg pointing bias at 20 km. Subtract the
+    # local undulation from an MSL figure before entering it here.
     "home_alt_m": 60.0,
     "lunar_enabled": True,
     "lunar_margin_deg": 0.10,
@@ -115,6 +126,21 @@ def geodetic_to_ecef(lat_deg, lon_deg, alt_m):
     y = (n + alt_m) * c * np.sin(lon)
     z = (n * (1.0 - WGS84_E2) + alt_m) * s
     return np.stack([x, y, z], axis=-1)
+
+
+def ecef_to_geodetic(x, y, z):
+    """ECEF (metres) -> (lat_deg, lon_deg, alt_m). Bowring's method."""
+    lon = math.atan2(y, x)
+    p = math.hypot(x, y)
+    if p < 1e-9:                        # on the spin axis
+        return (90.0 if z >= 0 else -90.0), math.degrees(lon), abs(z) - WGS84_A * math.sqrt(1 - WGS84_E2)
+    b = WGS84_A * math.sqrt(1.0 - WGS84_E2)
+    ep2 = (WGS84_A ** 2 - b ** 2) / b ** 2
+    th = math.atan2(z * WGS84_A, p * b)
+    lat = math.atan2(z + ep2 * b * math.sin(th) ** 3,
+                     p - WGS84_E2 * WGS84_A * math.cos(th) ** 3)
+    n = WGS84_A / math.sqrt(1.0 - WGS84_E2 * math.sin(lat) ** 2)
+    return math.degrees(lat), math.degrees(lon), p / math.cos(lat) - n
 
 
 class Observer:
@@ -154,16 +180,57 @@ class Observer:
 
 
 def project_track(lat, lon, alt_m, gs_ms, track_deg, vrate_ms, times_s):
-    """Dead-reckon a trajectory forward. Returns geodetic arrays (N,)."""
+    """Dead-reckon a trajectory forward. Returns geodetic arrays (N,).
+
+    Equirectangular stepping, but with the correct local radii of curvature:
+    latitude advances on the meridional radius M, longitude on the prime
+    vertical N. A single spherical 6371 km radius for both is ~0.2% out at
+    mid-latitudes (~37 m of along-track error over the 90 s horizon).
+    """
     t = np.asarray(times_s, dtype=float)
     dist = gs_ms * t
     brg = math.radians(track_deg)
-    r = 6371000.0 + alt_m
-    dlat = dist * math.cos(brg) / r
-    dlon = dist * math.sin(brg) / (r * math.cos(math.radians(lat)))
-    return (lat + np.degrees(dlat),
+    s2 = math.sin(math.radians(lat)) ** 2
+    m_r = WGS84_A * (1.0 - WGS84_E2) / (1.0 - WGS84_E2 * s2) ** 1.5 + alt_m
+    n_r = WGS84_A / math.sqrt(1.0 - WGS84_E2 * s2) + alt_m
+    dlat = dist * math.cos(brg) / m_r
+    lat_out = lat + np.degrees(dlat)
+    # advance longitude on the mean parallel rather than the initial one
+    cos_lat = np.cos(np.radians(0.5 * (lat + lat_out)))
+    cos_lat = np.where(np.abs(cos_lat) < 1e-9, 1e-9, cos_lat)
+    dlon = dist * math.sin(brg) / (n_r * cos_lat)
+    return (lat_out,
             lon + np.degrees(dlon),
             np.maximum(alt_m + vrate_ms * t, 0.0))
+
+
+def refine_min_sep(times, sep):
+    """Sub-sample closest approach from a sampled separation curve.
+
+    For a locally straight sky path at constant angular rate, sep(t)^2 is
+    exactly parabolic in t, so fitting a parabola to sep^2 at the three
+    samples bracketing argmin and taking its vertex recovers the true minimum.
+    Sampling alone reports (omega * STEP_S / 2) too much in the worst case --
+    at 1 deg/s that is 0.5 deg, roughly two lunar diameters, and always in the
+    direction of turning a real transit into an apparent miss.
+
+    Returns (min_sep_deg, t_min_s).
+    """
+    i = int(np.argmin(sep))
+    if len(sep) < 3:
+        return float(sep[i]), float(times[i])
+    j = min(max(i, 1), len(sep) - 2)
+    y0, y1, y2 = float(sep[j - 1]) ** 2, float(sep[j]) ** 2, float(sep[j + 1]) ** 2
+    a_c = (y0 - 2.0 * y1 + y2) / 2.0
+    b_c = (y2 - y0) / 2.0
+    if a_c <= 0.0:                      # not convex here: keep the raw sample
+        return float(sep[i]), float(times[i])
+    shift = -b_c / (2.0 * a_c)
+    if abs(shift) > 1.0:                # vertex outside the bracket: distrust
+        return float(sep[i]), float(times[i])
+    dt = float(times[1] - times[0]) if len(times) > 1 else 1.0
+    return (math.sqrt(max(y1 - b_c * b_c / (4.0 * a_c), 0.0)),
+            float(times[j]) + shift * dt)
 
 
 class CaptureTrigger:
@@ -322,7 +389,16 @@ class LunarTransitEngine:
         from skyfield.api import wgs84
 
         now = datetime.now().astimezone()
+        # datetime.astimezone() yields a FIXED offset for today, which would
+        # score every evening on the far side of a DST change against the
+        # wrong local hour. Resolve the real zone so each date gets its own.
         tz = now.tzinfo
+        try:
+            from zoneinfo import ZoneInfo
+            key = getattr(now.tzinfo, "key", None) or time.tzname[0]
+            tz = ZoneInfo(key)
+        except Exception:
+            pass                        # fall back to the fixed offset
         year, month = now.year, now.month
         ndays = calendar.monthrange(year, month)[1]
         step_min = 10
@@ -346,7 +422,8 @@ class LunarTransitEngine:
         for i, d in enumerate(range(1, ndays + 1)):
             seg = alt[i * spd:(i + 1) * spd]
             above = seg >= min_elev
-            hours = float(above.sum()) * step_min / 60.0
+            # n samples span (n-1) intervals, not n
+            hours = max(0.0, float(above.sum()) - 1.0) * step_min / 60.0
             if hours < 1.0:
                 continue
             first = int(np.argmax(above))
@@ -402,50 +479,84 @@ class LunarTransitEngine:
 
     # ---- aircraft input ---------------------------------------------------
     def read_aircraft(self):
+        """Live contacts from dump1090's aircraft.json.
+
+        Each contact carries "lag_s": how old its position fix is by wall
+        clock. dump1090 references seen_pos to the file's own "now" field, so
+        the total is (wall clock - file now) + seen_pos. Uncompensated, that
+        lag is pure along-track error: 1 s at 250 m/s is 250 m, which is ~1 deg
+        at 15 km slant range -- about two lunar diameters.
+        """
         try:
             age = time.time() - os.path.getmtime(ADSB_JSON)
             with open(ADSB_JSON) as f:
                 data = json.load(f)
         except Exception:
             return [], None
+        now = time.time()
+        file_now = data.get("now")
+        if not isinstance(file_now, (int, float)):
+            file_now = now - max(age, 0.0)
+        wall_lag = max(0.0, now - float(file_now))
         out = []
         for a in data.get("aircraft", []):
             lat, lon = a.get("lat"), a.get("lon")
             gs, trk = a.get("gs"), a.get("track")
-            alt = a.get("alt_geom", a.get("alt_baro"))
+            # alt_geom is height above the WGS-84 ellipsoid, which is what the
+            # ECEF conversion wants. alt_baro is pressure altitude (1013.25
+            # hPa) and can be several hundred feet out -- usable, but flagged.
+            # Note dict.get(k, default) only fires on a MISSING key, so an
+            # explicit null in the feed needs an isinstance check.
+            alt = a.get("alt_geom")
+            baro_only = False
+            if not isinstance(alt, (int, float)):
+                alt = a.get("alt_baro")     # may legitimately be "ground"
+                baro_only = True
             if None in (lat, lon, gs, trk) or not isinstance(alt, (int, float)):
                 continue
-            if (a.get("seen_pos") or a.get("seen") or 0) > 15:
+            lag = wall_lag + float(a.get("seen_pos") or a.get("seen") or 0.0)
+            if lag > MAX_REPORT_LAG_S:
                 continue
             out.append({
                 "hex": a.get("hex"), "flight": (a.get("flight") or "").strip(),
                 "lat": lat, "lon": lon, "alt_ft": alt,
                 "gs_kt": gs, "track": trk,
-                "vrate_fpm": a.get("baro_rate") or a.get("geom_rate") or 0,
+                # prefer the geometric rate, matching the altitude preference
+                "vrate_fpm": a.get("geom_rate") or a.get("baro_rate") or 0,
+                "lag_s": lag, "baro_only": baro_only,
             })
         return out, age
 
     # ---- simulation -------------------------------------------------------
     def start_simulation(self, observer, moon_az, moon_el, lead_s=60):
-        """Inject a fake aircraft that will cross the Moon's disc in ~lead_s."""
+        """Inject a fake aircraft that will cross the Moon's disc in ~lead_s.
+
+        The target point is built by inverting the real pipeline -- walk out
+        along the Moon's line of sight in ENU, rotate into ECEF, convert back
+        to geodetic -- rather than with flat-Earth degrees-per-metre constants.
+        The start point is then back-projected with project_track itself, so
+        the forward and reverse steps are exact inverses. Anything less and the
+        synthetic aircraft misses the sight line by a fair fraction of the
+        transit threshold, which makes the simulator useless for validating
+        the geometry it is supposed to be testing.
+        """
         alt_m = 10000.0
-        el = math.radians(moon_el)
-        ground_range = alt_m / math.tan(el) if el > 0.05 else 100000.0
-        slant_lat_off = (ground_range * math.cos(math.radians(moon_az))) / 111320.0
-        slant_lon_off = (ground_range * math.sin(math.radians(moon_az))) / (
-            111320.0 * math.cos(math.radians(observer.lat)))
-        # point on the Moon's line of sight; approach it from the south-west
-        tgt_lat = observer.lat + slant_lat_off
-        tgt_lon = observer.lon + slant_lon_off
+        el = max(math.radians(moon_el), math.radians(1.0))
+        # slant range along the sight line that reaches alt_m above the site
+        slant = (alt_m - observer.alt_m) / math.sin(el)
+        u = Observer.azel_to_unit(moon_az, moon_el)          # ENU unit vector
+        ecef = observer.ecef + (np.asarray(u).reshape(3) * slant) @ observer.enu
+        tgt_lat, tgt_lon, tgt_alt = ecef_to_geodetic(*ecef)
+
         gs_ms = 220.0
         heading = 45.0
-        back = gs_ms * lead_s
-        lat0 = tgt_lat - math.degrees(back * math.cos(math.radians(heading)) / 6371000.0)
-        lon0 = tgt_lon - math.degrees(back * math.sin(math.radians(heading)) /
-                                      (6371000.0 * math.cos(math.radians(tgt_lat))))
+        # back-project with the same routine (and radii) used going forward
+        lat0, lon0, _ = project_track(tgt_lat, tgt_lon, tgt_alt,
+                                      gs_ms, heading, 0.0, [-lead_s])
         self.sim = {
             "hex": "SIM001", "flight": "SIMULATE", "t0": time.time(),
-            "lat": lat0, "lon": lon0, "alt_ft": alt_m / FT_TO_M,
+            "lat": float(lat0[0]), "lon": float(lon0[0]),
+            "alt_ft": tgt_alt / FT_TO_M,
             "gs_kt": gs_ms / KT_TO_MS, "track": heading, "vrate_fpm": 0,
             "expires": time.time() + lead_s + 60,
         }
@@ -465,7 +576,8 @@ class LunarTransitEngine:
                                       s["gs_kt"] * KT_TO_MS, s["track"], 0.0, [dt])
         return {**{k: s[k] for k in ("hex", "flight", "gs_kt", "track", "vrate_fpm")},
                 "lat": float(lat[0]), "lon": float(lon[0]),
-                "alt_ft": float(alt[0] / FT_TO_M), "sim": True}
+                "alt_ft": float(alt[0] / FT_TO_M), "sim": True,
+                "lag_s": 0.0, "baro_only": False}
 
     # ---- main loop --------------------------------------------------------
     def run(self):
@@ -545,6 +657,28 @@ class LunarTransitEngine:
 
         aircraft, adsb_age = self.read_aircraft()
         sim = self.sim_aircraft()
+
+        # A dead dump1090 or a stalled remote feed freezes the whole file, and
+        # seen_pos freezes with it -- so the per-contact lag filter cannot see
+        # this. Without an explicit gate the engine would keep projecting
+        # minutes-old positions and could arm a capture on fictional geometry.
+        if sim is None and (adsb_age is None or adsb_age > MAX_FEED_AGE_S):
+            stale_for = "unavailable" if adsb_age is None else "%.0f s old" % adsb_age
+            with self.lock:
+                self.snap = {
+                    "ok": False,
+                    "message": "ADS-B feed stale (%s) — predictions suspended" % stale_for,
+                    "now": now, "adsb_age_s": (round(adsb_age, 1)
+                                               if adsb_age is not None else None),
+                    "moon": {
+                        "az": round(moon["az"], 2), "el": round(moon["el"], 2),
+                        "illum": round(moon["illum"], 3), "up": moon_up,
+                    },
+                    "n_tracked": 0, "candidates": [],
+                    "events": list(self.events)[:40],
+                }
+            return
+
         if sim:
             aircraft = aircraft + [sim]
 
@@ -554,35 +688,44 @@ class LunarTransitEngine:
 
         results = []
         for a in aircraft:
+            # Advance each trajectory by its own report lag so that t=0 is NOW
+            # for every contact. The Moon samples stay on `times` -- the lag is
+            # an aircraft-only defect -- so eta_s/tca_unix remain wall-clock
+            # referenced and the capture arming below is unaffected.
+            lag = float(a.get("lag_s") or 0.0)
             lat, lon, alt = project_track(
                 a["lat"], a["lon"], a["alt_ft"] * FT_TO_M,
                 a["gs_kt"] * KT_TO_MS, a["track"],
-                (a["vrate_fpm"] or 0) * FT_TO_M / 60.0, times)
+                (a["vrate_fpm"] or 0) * FT_TO_M / 60.0, times + lag)
             u = observer.unit_vectors(geodetic_to_ecef(lat, lon, alt))
             el_now = math.degrees(math.asin(max(-1, min(1, u[0, 2]))))
             if el_now < -2:
                 continue
             sep = np.degrees(np.arccos(np.clip(np.sum(u * moon_u, axis=1), -1, 1)))
-            i_min = int(np.argmin(sep))
-            min_sep = float(sep[i_min])
-            az_now, el_arr = Observer.azel(u[0:1])
+            min_sep, t_min = refine_min_sep(times, sep)
+            az_all, el_all = Observer.azel(u)
             r = {
                 "hex": a["hex"], "flight": a["flight"] or a["hex"],
                 "sim": bool(a.get("sim")),
-                "az": round(float(az_now[0]), 2), "el": round(el_now, 2),
+                "az": round(float(az_all[0]), 2), "el": round(el_now, 2),
                 "alt_ft": round(a["alt_ft"]), "gs_kt": round(a["gs_kt"]),
                 "sep_now": round(float(sep[0]), 3),
                 "min_sep": round(min_sep, 3),
-                "eta_s": int(times[i_min]),
-                "tca_unix": float(now + times[i_min]),
+                "eta_s": round(t_min, 1),
+                "tca_unix": float(now + t_min),
+                "lag_s": round(lag, 1),
+                "baro_only": bool(a.get("baro_only")),
                 "transit": bool(min_sep <= transit_deg),
                 "watch": bool(min_sep <= watch_deg),
             }
             if min_sep <= PATH_ZONE_DEG:
                 # path relative to Moon centre (deg): x = cross-track, y = elevation
-                daz = (Observer.azel(u)[0] - Observer.azel(moon_u)[0] + 540) % 360 - 180
-                dx = daz * np.cos(np.radians(Observer.azel(u)[1]))
-                dy = Observer.azel(u)[1] - Observer.azel(moon_u)[1]
+                m_az, m_el = Observer.azel(moon_u)
+                daz = (az_all - m_az + 540) % 360 - 180
+                # project on the mean elevation of the two bodies, not the
+                # aircraft's alone
+                dx = daz * np.cos(np.radians(0.5 * (el_all + m_el)))
+                dy = el_all - m_el
                 r["path"] = [[round(float(x), 3), round(float(y), 3)]
                              for x, y in zip(dx, dy)]
             results.append(r)
@@ -644,7 +787,9 @@ class LunarTransitEngine:
                     st["transit"] = now
                     self.log_event("transit",
                                    f"{r['flight']} predicted transit — min sep "
-                                   f"{r['min_sep']:.3f}° in {r['eta_s']}s", **{
+                                   f"{r['min_sep']:.3f}° in {r['eta_s']}s"
+                                   + (" [baro alt — low confidence]"
+                                      if r.get("baro_only") else ""), **{
                                        k: r[k] for k in ("hex", "min_sep", "eta_s")})
                     self.notify(cfg,
                         f"🌕✈️ <b>LUNAR TRANSIT IMMINENT</b>\n"
