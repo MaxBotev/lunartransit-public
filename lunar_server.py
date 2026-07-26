@@ -388,6 +388,26 @@ def create_app(state):
         ok, info = eng.capture.test(c["capture_host"], c["capture_port"])
         return jsonify({"ok": ok, "info": str(info)})
 
+    @app.route("/api/lunar/capture-manual", methods=["POST"])
+    def api_capture_manual():
+        """Operator REC/STOP from the dashboard — no prediction involved."""
+        eng = state.lunar
+        if not eng:
+            return jsonify({"ok": False, "info": "engine not running"})
+        action = ((request.get_json(force=True, silent=True) or {})
+                  .get("action") or "").upper()
+        if action not in ("REC", "STOP"):
+            return jsonify({"ok": False, "info": "action must be REC or STOP"})
+        c = eng.cfg()
+        if not c["capture_host"]:
+            return jsonify({"ok": False, "info": "capture_host not configured"})
+        ok, info = eng.capture.manual(c["capture_host"], c["capture_port"], action,
+                                      c.get("manual_capture_max_s", 300.0))
+        eng.log_event("capture", "manual %s -> %s:%s (%s)" % (
+            action, c["capture_host"], c["capture_port"], info), ok=ok)
+        return jsonify({"ok": ok, "info": str(info),
+                        "recording": eng.capture.manual_rec})
+
     @app.route("/api/lunar/simulate", methods=["POST"])
     def api_simulate():
         eng = state.lunar

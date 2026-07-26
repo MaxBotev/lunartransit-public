@@ -34,6 +34,15 @@ LUNAR_HTML = r"""<!DOCTYPE html>
   .btn{padding:6px 12px;border:1px solid rgba(35,230,255,.4);border-radius:6px;
     color:var(--cyan);background:var(--panel2);text-decoration:none;cursor:pointer;font:inherit;}
   .btn:hover{background:rgba(35,230,255,.12);}
+  .btn:disabled{opacity:.45;cursor:wait;}
+  /* manual record: idle = amber, live = pulsing red so it reads at a glance */
+  .btn.rec{width:100%;border-color:rgba(255,176,32,.55);color:#ffb020;
+           font-weight:700;letter-spacing:1px;}
+  .btn.rec:hover{background:rgba(255,176,32,.14);}
+  .btn.rec.live{border-color:rgba(255,64,64,.9);color:#ff5252;
+                background:rgba(255,64,64,.12);animation:recpulse 1.4s infinite;}
+  @keyframes recpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,64,64,.45);}
+                      50%{box-shadow:0 0 0 6px rgba(255,64,64,0);}}
   .sp{flex:1}
   .wrap{display:grid;grid-template-columns:1fr 340px;gap:14px;padding:14px;}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:14px;}
@@ -122,6 +131,9 @@ LUNAR_HTML = r"""<!DOCTYPE html>
         <div class="stat"><span>TARGET</span><b id="cHost">—</b></div>
         <div class="stat"><span>STATE</span><b id="cState">—</b></div>
         <div class="stat"><span>LAST</span><b id="cLast" style="font-size:11px">—</b></div>
+        <div class="row">
+          <button class="btn rec" id="recBtn" onclick="toggleRec()">⏺ START RECORDING</button>
+        </div>
         <div class="row">
           <button class="btn" onclick="testCapture()">⚡ TEST LINK</button>
           <button class="btn" onclick="simulate()">🛰 SIMULATE TRANSIT</button>
@@ -257,9 +269,24 @@ function render(){
          pc.className = 'pill ' + (cap.enabled ? 'live' : ''); }
   document.getElementById('cHost').textContent = cap.host ? cap.host + ':' + cap.port : 'not configured';
   document.getElementById('cState').textContent =
-    cap.recording ? 'RECORDING (stop in ' + cap.stop_in_s + 's)'
+    cap.manual_rec ? 'RECORDING — manual'
+      + (cap.manual_stop_in_s != null ? ' (auto-stop in ' + cap.manual_stop_in_s + 's)' : '')
+    : cap.recording ? 'RECORDING (stop in ' + cap.stop_in_s + 's)'
     : cap.armed_for ? 'armed — REC in ' + cap.rec_in_s + 's' : 'idle';
   document.getElementById('cLast').textContent = cap.last_result || '—';
+
+  // keep the record button in sync with the server, so it stays correct even
+  // if the recording was started elsewhere or auto-stopped on the time limit
+  if (!recBusy){
+    const rb = document.getElementById('recBtn');
+    recording = !!cap.manual_rec;
+    rb.textContent = recording ? '⏹ STOP RECORDING' : '⏺ START RECORDING';
+    rb.classList.toggle('live', recording);
+    rb.disabled = !cap.enabled || !cap.host;
+    rb.title = cap.enabled ? (cap.host ? 'Send REC/STOP to ' + cap.host + ':' + cap.port
+                                       : 'capture_host not configured')
+                           : 'capture_enabled is false in config.json';
+  }
 
   const anyTransit = (D.candidates || []).some(c => c.transit);
   document.getElementById('pillHot').style.display = anyTransit ? '' : 'none';
@@ -290,6 +317,28 @@ async function poll(){
     D = await (await fetch('/api/lunar')).json();
     render();
   } catch(e){}
+}
+let recording = false, recBusy = false;
+async function toggleRec(){
+  if (recBusy) return;
+  const rb = document.getElementById('recBtn'), msg = document.getElementById('capMsg');
+  const action = recording ? 'STOP' : 'REC';
+  recBusy = true; rb.disabled = true;
+  rb.textContent = action === 'REC' ? '⏺ starting…' : '⏹ stopping…';
+  msg.textContent = 'sending ' + action + '…';
+  try {
+    const r = await (await fetch('/api/lunar/capture-manual', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action: action})})).json();
+    recording = !!r.recording;
+    msg.textContent = (r.ok ? '✅ ' : '❌ ') + action + ' — ' + r.info;
+  } catch(e){
+    msg.textContent = '❌ ' + action + ' failed: ' + e;
+  } finally {
+    recBusy = false; rb.disabled = false;
+    rb.textContent = recording ? '⏹ STOP RECORDING' : '⏺ START RECORDING';
+    rb.classList.toggle('live', recording);
+  }
 }
 async function testCapture(){
   document.getElementById('capMsg').textContent = 'testing…';

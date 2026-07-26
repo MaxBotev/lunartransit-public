@@ -109,6 +109,7 @@ DEFAULTS = {
     "capture_port": 5580,
     "capture_pre_s": 20.0,
     "capture_post_s": 20.0,
+    "manual_capture_max_s": 300.0,  # safety auto-stop for a manual recording
     "horizon_file": "",             # NINA-format local horizon (optional)
     "horizon_margin_deg": 10.0,      # lower the effective horizon by this many
                                     # deg for ALERTS (bigger = less strict; the
@@ -249,6 +250,8 @@ class CaptureTrigger:
         self.stop_at = None
         self.rec_sent = False
         self.last_result = "idle"
+        self.manual_rec = False     # operator pressed record in the UI
+        self.manual_stop_at = None  # safety auto-stop deadline
 
     def _send(self, host, port, msg):
         try:
@@ -279,9 +282,45 @@ class CaptureTrigger:
             if not self.rec_sent:
                 self.last_result = f"armed for {hexid}"
 
+    def manual(self, host, port, action, max_s=300.0):
+        """Operator-driven REC/STOP from the UI, independent of predictions.
+
+        The network send happens OUTSIDE the lock: _send can block for up to
+        5 s on a dead listener, and holding the lock that long from a request
+        thread would stall the engine's own tick() -- exactly when a transit
+        might be firing.
+        """
+        action = (action or "").strip().upper()
+        if action not in ("REC", "STOP"):
+            return False, "action must be REC or STOP"
+        ok, info = self._send(host, port, action)
+        with self.lock:
+            if action == "REC" and ok:
+                self.manual_rec = True
+                self.manual_stop_at = time.time() + max(10.0, float(max_s))
+            elif action == "STOP":
+                self.manual_rec = False
+                self.manual_stop_at = None
+            self.last_result = "manual %s %s: %s" % (
+                action, "ok" if ok else "FAIL", info)
+        return ok, info
+
     def tick(self, now, cfg, log_event):
         host, port = cfg["capture_host"], cfg["capture_port"]
         with self.lock:
+            # Safety net: never leave the recorder running forever because a
+            # STOP was missed or the operator walked away.
+            if self.manual_rec and self.manual_stop_at and now >= self.manual_stop_at:
+                ok, info = self._send(host, port, "STOP")
+                self.manual_rec = False
+                self.manual_stop_at = None
+                self.last_result = "manual auto-STOP: %s" % info
+                log_event("capture", "manual recording auto-stopped (time limit)",
+                          ok=ok)
+            # While the operator owns the recorder the automatic logic stands
+            # down, so an auto STOP can't cut a manual recording short.
+            if self.manual_rec:
+                return
             if self.armed_hex is None:
                 return
             if not cfg["capture_enabled"] or not host:
@@ -306,7 +345,10 @@ class CaptureTrigger:
         with self.lock:
             return {
                 "armed_for": self.armed_hex,
-                "recording": self.rec_sent,
+                "recording": self.rec_sent or self.manual_rec,
+                "manual_rec": self.manual_rec,
+                "manual_stop_in_s": (round(self.manual_stop_at - now, 0)
+                                     if self.manual_stop_at else None),
                 "rec_in_s": round(self.rec_at - now, 1) if self.rec_at and not self.rec_sent else None,
                 "stop_in_s": round(self.stop_at - now, 1) if self.stop_at and self.rec_sent else None,
                 "last_result": self.last_result,
