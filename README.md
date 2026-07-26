@@ -163,6 +163,7 @@ machine. You can also change the site live from the dashboard (📍 SITE control
 | `lunar_watch_deg` | `2.0` | "Near miss" heads-up zone (degrees). |
 | `horizon_file` | `horizon.hrz` | Optional local skyline profile (see below). |
 | `horizon_margin_deg` | `10` | Lower the effective horizon by this much for alerts. |
+| `horizon_blocks_alerts` | `true` | Set `false` to keep drawing/reporting the skyline but stop it suppressing alerts and capture. |
 | `capture_enabled` | `false` | Enable the SharpCap TCP trigger. |
 | `capture_host` / `capture_port` | `127.0.0.1` / `5580` | Where the SharpCap listener runs. |
 | `capture_pre_s` / `capture_post_s` | `20` / `20` | Record from T−pre to T+post around closest approach. |
@@ -238,6 +239,18 @@ Check resolution from either machine with `ping sky.local`.
 `azimuth altitude` pairs (NINA custom-horizon format). The shipped file is
 **flat (altitude 0 all around)** — an unobstructed horizon. Edit it to your
 buildings/trees/hills so the predictor skips transits you physically can't see.
+
+⚠️ **A horizon profile silences alerts.** When the Moon sits behind it, the
+engine reports `moon behind local obstruction` and fires nothing — no Telegram,
+no capture, no logged event. A profile that is too aggressive (or measured from
+a different spot than you actually shoot from) will therefore look exactly like
+"no transits are happening". If alerts go quiet after you add one, check
+`/api/lunar` → `message` first.
+
+Set `horizon_blocks_alerts` to `false` to keep the profile drawn on the
+dashboard and keep `behind_horizon` reported, while letting alerts and capture
+fire anyway — useful when you can step around the obstruction, or would rather
+be told and judge for yourself. `lunar_min_elev_deg` still applies either way.
 
 ### Telegram alerts (optional)
 

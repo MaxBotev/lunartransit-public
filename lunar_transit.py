@@ -113,6 +113,12 @@ DEFAULTS = {
     "horizon_margin_deg": 10.0,      # lower the effective horizon by this many
                                     # deg for ALERTS (bigger = less strict; the
                                     # drawn skyline still shows the true file)
+    "horizon_blocks_alerts": True,  # False = keep drawing the skyline and keep
+                                    # reporting when the Moon is behind it, but
+                                    # DON'T let it suppress alerts or capture.
+                                    # Useful when the profile describes a fixed
+                                    # pier that you can shoot around, or when
+                                    # you'd rather be told and decide yourself.
 }
 
 
@@ -413,7 +419,9 @@ class LunarTransitEngine:
         _aa = site.at(t).observe(self._moon).apparent().altaz()
         alt = _aa[0].degrees
         _az = _aa[1].degrees
-        if self.horizon:
+        # Only discount horizon-blocked time when the horizon is actually
+        # allowed to gate; otherwise these evenings are still worth shooting.
+        if self.horizon and self.cfg_val("horizon_blocks_alerts", True):
             _mg = self.cfg_val("horizon_margin_deg", 0.0)
             _hz = np.array([horizon_alt_at(self.horizon, a) - _mg for a in _az])
             alt = np.where(alt >= _hz, alt, -90.0)   # blocked = below
@@ -653,7 +661,13 @@ class LunarTransitEngine:
         hrz_alt = horizon_alt_at(self.horizon, moon["az"])
         hrz_gate = hrz_alt - cfg.get("horizon_margin_deg", 0.0)
         clear_of_horizon = moon["el"] >= hrz_gate
-        moon_up = bool(moon["el"] >= cfg["lunar_min_elev_deg"] and clear_of_horizon)
+        above_min_elev = moon["el"] >= cfg["lunar_min_elev_deg"]
+        # The local horizon suppresses alerts only when it is allowed to. With
+        # horizon_blocks_alerts False the profile is still loaded, drawn and
+        # reported -- it just stops gating alerts and capture.
+        horizon_gates = cfg.get("horizon_blocks_alerts", True)
+        behind_horizon = not clear_of_horizon
+        moon_up = bool(above_min_elev and (clear_of_horizon or not horizon_gates))
 
         aircraft, adsb_age = self.read_aircraft()
         sim = self.sim_aircraft()
@@ -740,9 +754,12 @@ class LunarTransitEngine:
                 del self.alerted[h]
 
         with self.lock:
-            if moon_up:
+            if moon_up and behind_horizon:
+                msg = ("tracking — moon behind local horizon (%.0f° at az %.0f°), "
+                       "alerts forced on" % (hrz_gate, moon["az"]))
+            elif moon_up:
                 msg = "tracking"
-            elif moon["el"] >= cfg["lunar_min_elev_deg"]:
+            elif above_min_elev:
                 msg = "moon behind local obstruction (horizon %.0f° at az %.0f°)" % (
                     hrz_gate, moon["az"])
             else:
@@ -761,6 +778,8 @@ class LunarTransitEngine:
                     "sun_az": round(moon["sun_az"], 2),
                     "sun_el": round(moon["sun_el"], 2),
                     "horizon_alt": round(hrz_alt, 1),
+                    "behind_horizon": bool(behind_horizon),
+                    "horizon_gates_alerts": bool(horizon_gates),
                 },
                 "horizon": self.horizon,
                 "best_dates": self.best_dates_snapshot(),
