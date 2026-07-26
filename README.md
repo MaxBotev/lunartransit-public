@@ -172,6 +172,7 @@ machine. You can also change the site live from the dashboard (📍 SITE control
 | `capture_on_possible` | `true` | Arm the recorder for POSSIBLE transits too, not just confident ones. |
 | `adsb_pos_sigma_m` / `lag_sigma_s` / `site_alt_sigma_m` | `20` / `0.25` / `10` | Error-budget inputs. |
 | `manual_capture_max_s` | `300` | Safety auto-stop for a manual recording. |
+| `meridian_warn_min` | `20` | Warn this many minutes before the Moon reaches the meridian (0 disables). |
 | `telegram_enabled` | `false` | Master switch for Telegram alerts. |
 | `telegram_bot_token` | `""` | From [@BotFather](https://t.me/BotFather). **Never commit — it stays in the git-ignored `config.json`.** |
 | `telegram_chat_id` | `""` | Your chat id (e.g. via @userinfobot). |
@@ -237,6 +238,33 @@ bare hostname (`http://sky:8080/…`) is a useful second string via NetBIOS/DNS
 suffix, and a literal IP makes a reasonable last resort.
 
 Check resolution from either machine with `ping sky.local`.
+
+### Equatorial mounts: the meridian will bite you
+
+A German-equatorial mount stops tracking at its meridian limit and then
+**refuses to restart until it is flipped**. For lunar work that limit sits in
+the worst possible place: the Moon is highest — best seeing, best transit
+geometry — exactly where the mount wants to stop.
+
+Observed on a ZWO AM5N: tracking cut out ~4° (16 min) past the meridian with
+
+```
+[WRN] Tracking: It might hit the tripod legs after meridian flip so tracking has been stopped
+```
+
+and every attempt to re-enable tracking logged `Tracking Set: Fail` until the
+pier side flipped.
+
+LunarTransit therefore warns (Telegram + event log + a MERIDIAN countdown on
+`/lunar`) `meridian_warn_min` minutes before the crossing, so you can flip while
+it is cheap. `/api/lunar` exposes `moon.ha_h` and `moon.to_meridian_min` if you
+want to drive your own automation from it.
+
+SharpCap can perform the flip itself — the sequencer has a *Meridian Flip the
+mount* step — but it is marked **experimental** and does not handle
+mount-specific quirks, including the "stuck past the meridian" state this very
+mount gets into. Flipping *before* the limit is far more reliable than trying to
+recover after it.
 
 ### Local horizon (optional)
 

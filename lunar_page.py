@@ -71,6 +71,7 @@ LUNAR_HTML = r"""<!DOCTYPE html>
   .ev .t{color:var(--dim);}
   .ev.transit .x{color:var(--red);} .ev.watch .x{color:var(--amber);}
   .ev.possible .x{color:#ff8c3c;}
+  .ev.meridian .x{color:#ff8c3c;font-weight:700;}
   .ev.capture .x{color:var(--green);} .ev.sim .x{color:var(--cyan);}
   .muted{color:var(--dim);}
   .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
@@ -123,6 +124,7 @@ LUNAR_HTML = r"""<!DOCTYPE html>
         <div class="stat"><span>ANGULAR Ø</span><b id="mDia">—</b></div>
         <div class="stat"><span>ILLUMINATION</span><b id="mIll">—</b></div>
         <div class="stat"><span>TRANSIT THRESHOLD</span><b class="hi" id="mThresh">—</b></div>
+        <div class="stat"><span>MERIDIAN</span><b id="mMer">—</b></div>
         <div style="margin-top:12px;font-size:10px;letter-spacing:2px;color:var(--dim)"
              id="bestHdr">BEST DATES</div>
         <div id="bestDates" class="muted" style="margin-top:4px">—</div>
@@ -242,7 +244,15 @@ function render(){
     document.getElementById('mDist').textContent = m.dist_km.toLocaleString() + ' km';
     document.getElementById('mDia').textContent = (m.radius_deg*2).toFixed(3) + '°';
     document.getElementById('mIll').textContent = (m.illum*100).toFixed(1) + '%';
-    document.getElementById('mThresh').textContent = D.thresholds.transit_deg.toFixed(3) + '°';
+    const tm = (D.moon || {}).to_meridian_min;
+  const merEl = document.getElementById('mMer');
+  if (tm == null) { merEl.textContent = '—'; merEl.style.color = ''; }
+  else if (tm > 0) {
+    merEl.textContent = 'in ' + Math.round(tm) + ' min';
+    // an equatorial mount stops tracking at its meridian limit — flag it early
+    merEl.style.color = tm <= 20 ? 'var(--red)' : (tm <= 45 ? 'var(--amber)' : '');
+  } else { merEl.textContent = Math.round(-tm) + ' min past'; merEl.style.color = ''; }
+  document.getElementById('mThresh').textContent = D.thresholds.transit_deg.toFixed(3) + '°';
     const bd = D.best_dates;
     if (bd){
       document.getElementById('bestHdr').textContent = 'BEST DATES — ' + bd.month;

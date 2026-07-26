@@ -115,6 +115,10 @@ DEFAULTS = {
     # is 0.8 deg, more than twice the lunar disc, so real transits get reported
     # as misses. These feed a per-target error bar; a transit inside that bar
     # is announced as POSSIBLE rather than silently dropped.
+    # Warn before the Moon reaches the meridian, where a German-equatorial
+    # mount's meridian/tripod limit will stop tracking -- which for lunar work
+    # is exactly the best part of the night. 0 disables.
+    "meridian_warn_min": 20.0,
     "uncertainty_alerts": True,
     "uncertainty_sigmas": 2.0,      # how many sigma counts as "can't rule out".
                                     # 1.0 is tight and still misses real ones;
@@ -390,6 +394,7 @@ class LunarTransitEngine:
         self.capture = CaptureTrigger()
         self.sim = None             # synthetic aircraft for end-to-end testing
         self.best = None            # cached best-dates for the current month
+        self._mer_warned = False    # meridian heads-up already sent this pass
         self.horizon = None         # local-horizon profile [(az, alt), ...]
         self._hrz_mtime = None
         self._eph = None
@@ -531,6 +536,24 @@ class LunarTransitEngine:
         top = sorted(future, key=lambda d: -d["score"])[:5]
         return {"month": self.best["month_name"],
                 "dates": sorted(top, key=lambda d: d["day"])}
+
+    def moon_hour_angle(self, observer, unix_time):
+        """Moon hour angle in hours, normalised to [-12, +12).
+
+        Negative = still east of the meridian (approaching), positive = past it.
+        This is what decides when a German-equatorial mount hits its meridian
+        limit, which for lunar work lands squarely in the best viewing window:
+        the Moon is highest exactly where the mount wants to stop.
+        """
+        from skyfield.api import wgs84
+        from datetime import datetime, timezone
+        site = self._earth + wgs84.latlon(observer.lat, observer.lon,
+                                          elevation_m=observer.alt_m)
+        t = self._ts.from_datetime(
+            datetime.fromtimestamp(unix_time, tz=timezone.utc))
+        ra, _dec, _d = site.at(t).observe(self._moon).apparent().radec()
+        lst = (t.gmst + observer.lon / 15.0) % 24.0
+        return (lst - ra.hours + 12.0) % 24.0 - 12.0
 
     def sun_azel(self, observer, unix_time):
         """Sun topocentric az/el (used for 3D moon-phase lighting)."""
@@ -703,6 +726,7 @@ class LunarTransitEngine:
                         "radius_deg": math.degrees(math.asin(MOON_RADIUS_KM / dist2[0])),
                         "phase": float(phase), "illum": float(illum),
                         "sun_az": sun_az, "sun_el": sun_el,
+                        "ha_h": self.moon_hour_angle(observer, now),
                     }
                     last_moon = now
                 month_key = time.strftime("%Y-%m")
@@ -748,6 +772,40 @@ class LunarTransitEngine:
                              * math.cos(math.radians(float(el_all[i]))) / r_m)
         return math.sqrt(sig_t * sig_t + sig_p * sig_p + sig_h * sig_h)
 
+    def check_meridian(self, cfg, moon, moon_above_min):
+        """Heads-up before the Moon reaches the meridian.
+
+        A German-equatorial mount stops tracking at its meridian/tripod limit
+        and then refuses to restart until it is flipped -- and for lunar work
+        that limit sits in the middle of the best window, because the Moon is
+        highest exactly where the mount wants to stop. Flipping a few minutes
+        early costs nothing; discovering it mid-transit costs the session.
+        """
+        warn_min = float(cfg.get("meridian_warn_min", 20.0) or 0.0)
+        ha = moon.get("ha_h")
+        if warn_min <= 0 or ha is None:
+            return
+        to_mer = -ha * 60.0                      # minutes until the meridian
+        # re-arm once the Moon is comfortably away from the crossing again
+        if to_mer > warn_min + 10.0 or to_mer < -90.0:
+            self._mer_warned = False
+            return
+        if (self._mer_warned or not moon_above_min
+                or to_mer <= 0.0 or to_mer > warn_min):
+            return
+        self._mer_warned = True
+        self.log_event("meridian",
+                       "Moon reaches the meridian in %.0f min — flip now or the "
+                       "mount will stop tracking mid-window" % to_mer,
+                       to_meridian_min=round(to_mer, 1))
+        self.notify(cfg,
+            f"🔭⚠️ <b>MERIDIAN IN ~{to_mer:.0f} MIN</b>\n"
+            f"The Moon crosses the meridian at az {moon['az']:.0f}° / "
+            f"el {moon['el']:.0f}°.\n"
+            f"An equatorial mount will hit its meridian limit and <b>stop "
+            f"tracking</b> — and refuse to restart until flipped.\n"
+            f"Flip now to keep the best part of the window.")
+
     def step(self, cfg, observer, moon, now):
         transit_deg = moon["radius_deg"] + cfg["lunar_margin_deg"]
         watch_deg = cfg["lunar_watch_deg"]
@@ -761,6 +819,8 @@ class LunarTransitEngine:
         horizon_gates = cfg.get("horizon_blocks_alerts", True)
         behind_horizon = not clear_of_horizon
         moon_up = bool(above_min_elev and (clear_of_horizon or not horizon_gates))
+
+        self.check_meridian(cfg, moon, above_min_elev)
 
         aircraft, adsb_age = self.read_aircraft()
         sim = self.sim_aircraft()
@@ -889,6 +949,10 @@ class LunarTransitEngine:
                     "horizon_alt": round(hrz_alt, 1),
                     "behind_horizon": bool(behind_horizon),
                     "horizon_gates_alerts": bool(horizon_gates),
+                    "ha_h": (round(moon["ha_h"], 4)
+                             if moon.get("ha_h") is not None else None),
+                    "to_meridian_min": (round(-moon["ha_h"] * 60.0, 1)
+                                        if moon.get("ha_h") is not None else None),
                 },
                 "horizon": self.horizon,
                 "best_dates": self.best_dates_snapshot(),
