@@ -43,17 +43,48 @@ ADSB3D_HTML = r"""<!DOCTYPE html>
     letter-spacing:1px;background:var(--panel);border:1px solid var(--line);
     border-radius:6px;padding:4px 10px;}
   input[type=range]{width:90px;accent-color:var(--cyan);}
-  #info{position:fixed;left:14px;bottom:14px;z-index:10;background:var(--panel);
-    border:1px solid var(--line);border-radius:10px;padding:12px 16px;min-width:240px;
-    display:none;}
+  /* bottom-left stack: aircraft card sits above the controls hint, and the
+     hint stays pinned to the corner whether or not a plane is selected */
+  #bl{position:fixed;left:14px;bottom:14px;z-index:10;display:flex;
+    flex-direction:column;align-items:flex-start;gap:8px;
+    max-width:min(92vw,420px);pointer-events:none;}
+  #bl>*{pointer-events:auto;}
+  #info{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:12px 16px;min-width:240px;max-width:100%;display:none;}
   #info h3{margin:0 0 6px;color:var(--cyan);font-size:14px;letter-spacing:1px;}
   #info .row{display:flex;justify-content:space-between;gap:18px;padding:2px 0;
     border-bottom:1px dashed var(--line);font-size:12px;}
   #info .row span:first-child{color:var(--dim);}
   #status{position:fixed;right:14px;bottom:14px;z-index:10;color:var(--dim);font-size:11px;
-    text-align:right;}
-  #help{position:fixed;left:14px;top:56px;z-index:10;color:var(--dim);font-size:10px;
-    letter-spacing:1px;}
+    text-align:right;max-width:44vw;}
+  #help{color:var(--dim);font-size:10px;letter-spacing:1px;line-height:1.6;}
+  /* manual record: amber idle, pulsing red while rolling */
+  .btn.rec{border-color:rgba(255,176,32,.6);color:var(--amber);font-weight:700;}
+  .btn.rec:hover{background:rgba(255,176,32,.15);}
+  .btn.rec.live{border-color:rgba(255,64,64,.9);color:#ff5252;
+    background:rgba(255,64,64,.14);animation:recpulse 1.4s infinite;}
+  .btn:disabled{opacity:.45;cursor:not-allowed;}
+  @keyframes recpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,64,64,.45);}
+                      50%{box-shadow:0 0 0 6px rgba(255,64,64,0);}}
+  /* ---- phones/tablets: one swipeable toolbar row instead of 5 wrapped ones ---- */
+  @media (max-width:900px){
+    header{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;gap:6px;
+      padding:8px 10px;scrollbar-width:none;-webkit-overflow-scrolling:touch;}
+    header::-webkit-scrollbar{display:none;}
+    header>*{flex:0 0 auto;}
+    .sp{display:none;}
+    .logo{font-size:13px;letter-spacing:2px;}
+    .btn{padding:5px 9px;font-size:11px;}
+    .pill{font-size:10px;padding:3px 8px;}
+    label.ex{font-size:9px;padding:3px 8px;}
+    input[type=range]{width:64px;}
+    #bl{left:8px;bottom:8px;right:8px;max-width:none;}
+    #info{min-width:0;width:100%;padding:10px 12px;}
+    #help{font-size:9px;letter-spacing:.5px;}
+    /* the bottom belongs to the info card + hint on a narrow screen, so the
+       status line moves up under the toolbar instead of colliding with them */
+    #status{top:44px;bottom:auto;right:8px;left:auto;font-size:9px;max-width:58vw;}
+  }
 </style>
 </head>
 <body>
@@ -62,6 +93,7 @@ ADSB3D_HTML = r"""<!DOCTYPE html>
   <div class="logo">ADSB<b>▸</b>3D</div>
   <span id="pillLive" class="pill">—</span>
   <span id="pillN" class="pill">0 AC</span>
+  <button class="btn rec" id="btnRec">⏺ REC</button>
   <label class="ex">RELIEF ×<span id="exVal">2.5</span>
     <input id="exSlider" type="range" min="1" max="5" step="0.5" value="2.5"></label>
   <label class="ex">Ø<span id="diamVal">100</span>mi
@@ -96,11 +128,13 @@ ADSB3D_HTML = r"""<!DOCTYPE html>
   <a class="btn" href="/lunar">🌕 LUNAR</a>
   <a class="btn" href="/">📡 RF</a>
 </header>
-<div id="help">DRAG rotate · WHEEL zoom · RIGHT-DRAG pan · CLICK aircraft ·
-trail dots: <span style="color:#37ffb0">●climb</span>
-<span style="color:#ff884d">●descend</span>
-<span style="color:#23e6ff">●level</span></div>
-<div id="info"></div>
+<div id="bl">
+  <div id="info"></div>
+  <div id="help">DRAG rotate · WHEEL zoom · RIGHT-DRAG pan · CLICK aircraft ·
+  trail dots: <span style="color:#37ffb0">●climb</span>
+  <span style="color:#ff884d">●descend</span>
+  <span style="color:#23e6ff">●level</span></div>
+</div>
 <div id="sitePanel" style="position:fixed;right:14px;top:56px;z-index:30;background:var(--panel);
      border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:none;width:300px">
   <h3 style="margin:0 0 10px;color:var(--cyan);font-size:12px;letter-spacing:2px">OBSERVER SITE</h3>
@@ -1134,9 +1168,50 @@ async function pollMoon(){
     if (d.horizon) buildHorizon(d.horizon);
     if (d.moon && !moonPreview) updateMoon(d.moon);   // preview freezes the moon
     scanTransitAlarms(d);                             // …but alarms stay live
+    syncRec(d.capture);
   } catch(e){}
 }
 pollMoon(); setInterval(pollMoon, 5000);
+
+// ---------- manual capture: roll the camera by hand ----------
+let recording = false, recBusy = false;
+const recBtn = document.getElementById('btnRec');
+
+function syncRec(cap){
+  // server is the source of truth, so the button stays right even if the
+  // recording was started from /lunar or ended on the safety auto-stop
+  if (recBusy || !cap) return;
+  recording = !!cap.manual_rec;
+  recBtn.textContent = recording ? '⏹ STOP' : '⏺ REC';
+  recBtn.classList.toggle('live', recording);
+  recBtn.disabled = !cap.enabled || !cap.host;
+  recBtn.title = !cap.enabled ? 'capture_enabled is false in config.json'
+               : !cap.host ? 'capture_host not configured'
+               : (recording
+                    ? 'Recording' + (cap.manual_stop_in_s != null
+                        ? ' — auto-stop in ' + cap.manual_stop_in_s + 's' : '')
+                    : 'Send REC to ' + cap.host + ':' + cap.port);
+}
+
+recBtn.onclick = async () => {
+  if (recBusy) return;
+  const action = recording ? 'STOP' : 'REC';
+  recBusy = true; recBtn.disabled = true;
+  recBtn.textContent = action === 'REC' ? '⏺ …' : '⏹ …';
+  try {
+    const r = await (await fetch('/api/lunar/capture-manual', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: action})})).json();
+    recording = !!r.recording;
+    statusEl.textContent = (r.ok ? '✅ ' : '❌ ') + action + ' — ' + r.info;
+  } catch(e){
+    statusEl.textContent = '❌ ' + action + ' failed: ' + e;
+  } finally {
+    recBusy = false; recBtn.disabled = false;
+    recBtn.textContent = recording ? '⏹ STOP' : '⏺ REC';
+    recBtn.classList.toggle('live', recording);
+  }
+};
 
 // ---------- transit alarm: flash the offending plane red for 60 s ----------
 const ALARM_COL = new THREE.Color(0xff2233);

@@ -731,6 +731,13 @@ class LunarTransitEngine:
                         "illum": round(moon["illum"], 3), "up": moon_up,
                     },
                     "n_tracked": 0, "candidates": [],
+                    # keep reporting capture state: a dead feed is exactly when
+                    # you may want to roll the camera by hand
+                    "capture": {
+                        "enabled": cfg["capture_enabled"],
+                        "host": cfg["capture_host"], "port": cfg["capture_port"],
+                        **self.capture.snapshot(now),
+                    },
                     "events": list(self.events)[:40],
                 }
             return
