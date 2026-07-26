@@ -18,12 +18,237 @@
 # SharpCap's scripting console is IronPython — this file sticks to the 2.x
 # stdlib subset that works there.
 
+import math
 import socket
 import threading
+import time
 import traceback
 
 PORT = 5580
-MAX_CAPTURE_S = 120  # safety: force-stop if STOP never arrives
+MAX_CAPTURE_S = 120     # safety: force-stop if STOP never arrives
+SLEW_TIMEOUT_S = 180    # abort a slew that never finishes
+MAX_NUDGE_ARCSEC = 5400 # refuse absurd corrections (1.5 deg) from a bad centroid
+SNAP_PATH = r"C:\LunarTransit\af_frame.png"
+
+
+def _mount():
+    """The selected mount's raw ASCOM interface (documented semantics:
+    RA in hours, Dec in degrees, SideOfPier as PierSide enum)."""
+    m = SharpCap.Mounts.SelectedMount  # noqa: F821
+    if m is None:
+        raise RuntimeError("no mount selected in SharpCap")
+    if not m.Connected:
+        raise RuntimeError("mount not connected")
+    a = getattr(m, "AscomMount", None)
+    if a is None:
+        raise RuntimeError("mount is not an ASCOM device")
+    return a
+
+
+def _pier(a):
+    try:
+        return str(a.SideOfPier)
+    except Exception:
+        return "?"
+
+
+def mount_state():
+    """MOUNT — one line of everything the orchestrator needs to decide."""
+    try:
+        a = _mount()
+        return ("OK ra=%.6f dec=%.6f pier=%s ha=%.5f lst=%.6f tracking=%s "
+                "rate=%s slewing=%s canpulse=%s canflip=%s" % (
+                    a.RightAscension, a.Declination, _pier(a),
+                    (a.SiderealTime - a.RightAscension + 12.0) % 24.0 - 12.0,
+                    a.SiderealTime, a.Tracking, a.TrackingRate, a.Slewing,
+                    a.CanPulseGuide, a.CanSetPierSide))
+    except Exception as e:
+        return "ERR " + str(e)
+
+
+def _wait_slew(a, timeout=SLEW_TIMEOUT_S):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            if not a.Slewing:
+                time.sleep(1.5)          # let the mount settle
+                if not a.Slewing:
+                    return None
+        except Exception as e:
+            return "slew poll failed: %s" % e
+        time.sleep(0.4)
+    try:
+        a.AbortSlew()
+    except Exception:
+        pass
+    return "slew timed out after %ds (aborted)" % timeout
+
+
+def slew_to(arg, force_flip=False):
+    """SLEW/FLIP <ra_hours> <dec_deg>.
+
+    With force_flip, refuse unless the mount agrees the GOTO lands on the OTHER
+    side of the pier, and verify afterwards that it actually did. Blindly
+    assuming a flip happened is how an OTA ends up against a tripod leg.
+    """
+    try:
+        ra_s, dec_s = arg.split()
+        ra, dec = float(ra_s), float(dec_s)
+    except Exception:
+        return "ERR usage: SLEW <ra_hours> <dec_deg>"
+    if not (0.0 <= ra < 24.0 and -90.0 <= dec <= 90.0):
+        return "ERR coordinates out of range"
+    try:
+        a = _mount()
+        if a.AtPark:
+            return "ERR mount is parked"
+        before = _pier(a)
+        if force_flip:
+            try:
+                dest = str(a.DestinationSideOfPier(ra, dec))
+            except Exception as e:
+                return "ERR cannot query DestinationSideOfPier: %s" % e
+            if dest == before:
+                return ("ERR refusing: GOTO would stay on pier side %s "
+                        "(not a flip yet — too far from the meridian?)" % before)
+        was_tracking = a.Tracking
+        a.SlewToCoordinatesAsync(ra, dec)
+        err = _wait_slew(a)
+        if err:
+            return "ERR " + err
+        after = _pier(a)
+        if force_flip and after == before:
+            return "ERR slew finished but pier side is still %s — flip FAILED" % after
+        if was_tracking and not a.Tracking:
+            try:
+                a.Tracking = True
+            except Exception:
+                pass
+        return "OK slewed ra=%.6f dec=%.6f pier %s->%s" % (
+            a.RightAscension, a.Declination, before, after)
+    except Exception as e:
+        return "ERR " + str(e)
+
+
+def nudge(arg):
+    """NUDGE <dRA_arcsec> <dDec_arcsec> — small ON-SKY relative correction.
+
+    Commanded relative to the mount's own reported position, so a static
+    pointing-model error cancels out. Guarded so a bad centroid can't fling
+    the OTA across the sky or trip a pier flip mid-centring.
+    """
+    try:
+        dra_s, ddec_s = arg.split()
+        dra, ddec = float(dra_s), float(ddec_s)
+    except Exception:
+        return "ERR usage: NUDGE <dRA_arcsec> <dDec_arcsec>"
+    if abs(dra) > MAX_NUDGE_ARCSEC or abs(ddec) > MAX_NUDGE_ARCSEC:
+        return "ERR correction too large (%.0f,%.0f arcsec) — refusing" % (dra, ddec)
+    try:
+        a = _mount()
+        dec0 = a.Declination
+        cosd = math.cos(math.radians(max(-89.5, min(89.5, dec0))))
+        if abs(cosd) < 1e-3:
+            return "ERR too close to the pole for an RA offset"
+        ra_new = (a.RightAscension + dra / 3600.0 / 15.0 / cosd) % 24.0
+        dec_new = max(-90.0, min(90.0, dec0 + ddec / 3600.0))
+        before = _pier(a)
+        try:
+            if str(a.DestinationSideOfPier(ra_new, dec_new)) != before:
+                return "ERR refusing nudge: it would change pier side"
+        except Exception:
+            pass                      # driver may not implement it; continue
+        a.SlewToCoordinatesAsync(ra_new, dec_new)
+        err = _wait_slew(a, timeout=60)
+        if err:
+            return "ERR " + err
+        return "OK nudged dRA=%.1f dDec=%.1f arcsec" % (dra, ddec)
+    except Exception as e:
+        return "ERR " + str(e)
+
+
+def set_tracking(arg):
+    """TRACK ON|OFF [LUNAR|SIDEREAL|SOLAR]"""
+    parts = arg.split()
+    if not parts:
+        return "ERR usage: TRACK ON|OFF [LUNAR|SIDEREAL|SOLAR]"
+    want = parts[0].upper() in ("ON", "1", "TRUE")
+    try:
+        a = _mount()
+        if len(parts) > 1:
+            import System
+            names = {"SIDEREAL": "driveSidereal", "LUNAR": "driveLunar",
+                     "SOLAR": "driveSolar", "KING": "driveKing"}
+            key = names.get(parts[1].upper())
+            if key:
+                try:
+                    a.TrackingRate = System.Enum.Parse(
+                        a.TrackingRate.GetType(), key)
+                except Exception as e:
+                    return "ERR tracking rate: %s" % e
+        a.Tracking = want
+        time.sleep(0.5)
+        if bool(a.Tracking) != want:
+            return "ERR mount refused tracking=%s (past a meridian limit?)" % want
+        return "OK tracking=%s rate=%s" % (a.Tracking, a.TrackingRate)
+    except Exception as e:
+        return "ERR " + str(e)
+
+
+def moon_position(arg):
+    """MOONPOS — snap a frame and locate the lunar disc in it.
+
+    Returns the bounding box of the lit region. Its centre is the disc centre
+    for a gibbous/full Moon, and its LONGEST side is the full diameter at any
+    phase (the terminator only cuts the short axis) — which lets the caller
+    derive arcsec/pixel from the Moon's known angular size, with no focal
+    length or pixel size needed.
+    """
+    try:
+        cam = SharpCap.SelectedCamera  # noqa: F821
+        if cam is None:
+            return "ERR no camera"
+        path = arg or SNAP_PATH
+        cam.CaptureSingleFrameTo(path)
+        import clr
+        clr.AddReference("System.Drawing")
+        from System.Drawing import Bitmap
+        bmp = Bitmap(path)
+        try:
+            w, h = bmp.Width, bmp.Height
+            step = max(1, int(max(w, h) / 240))     # ~240 samples on the long axis
+            peak = 0
+            for y in range(0, h, step):
+                for x in range(0, w, step):
+                    v = bmp.GetPixel(x, y).R
+                    if v > peak:
+                        peak = v
+            if peak < 25:
+                return "ERR frame is blank (peak=%d) — Moon not in field?" % peak
+            thr = peak * 0.45
+            n = 0
+            sx = sy = 0
+            x0, y0, x1, y1 = w, h, -1, -1
+            for y in range(0, h, step):
+                for x in range(0, w, step):
+                    if bmp.GetPixel(x, y).R >= thr:
+                        n += 1
+                        sx += x
+                        sy += y
+                        if x < x0: x0 = x
+                        if y < y0: y0 = y
+                        if x > x1: x1 = x
+                        if y > y1: y1 = y
+            if n < 12:
+                return "ERR only %d lit samples — no disc found" % n
+            return ("OK cx=%.1f cy=%.1f bx0=%d by0=%d bx1=%d by1=%d "
+                    "w=%d h=%d n=%d peak=%d step=%d" % (
+                        float(sx) / n, float(sy) / n, x0, y0, x1, y1,
+                        w, h, n, peak, step))
+        finally:
+            bmp.Dispose()
+    except Exception as e:
+        return "ERR " + str(e)
 
 
 def _capturing(cam):
@@ -172,6 +397,18 @@ def handle(conn, addr):
             reply = cam_info()
         elif cmd == "DIR":
             reply = dir_of(arg)
+        elif cmd == "MOUNT":
+            reply = mount_state()
+        elif cmd == "SLEW":
+            reply = slew_to(arg)
+        elif cmd == "FLIP":
+            reply = slew_to(arg, force_flip=True)
+        elif cmd == "NUDGE":
+            reply = nudge(arg)
+        elif cmd == "TRACK":
+            reply = set_tracking(arg)
+        elif cmd == "MOONPOS":
+            reply = moon_position(arg)
         elif cmd == "TEMP":
             reply = focuser_info()
         elif cmd == "FPOS":

@@ -119,6 +119,17 @@ DEFAULTS = {
     # mount's meridian/tripod limit will stop tracking -- which for lunar work
     # is exactly the best part of the night. 0 disables.
     "meridian_warn_min": 20.0,
+    # Automatic flip. Off by default: it commands real motion across the
+    # meridian, which is exactly the movement the mount's tripod limit exists
+    # to prevent. flip_lead_min is how long BEFORE the crossing to start, so
+    # the whole slew + re-centre finishes before the mount's own limit trips.
+    "auto_flip": False,
+    "flip_lead_min": 3.0,
+    "flip_slew_s": 90.0,
+    "centre_tol_arcsec": 90.0,
+    "centre_max_iter": 6,
+    "calib_step_arcsec": 300.0,
+    "min_illum_for_centring": 0.35,
     "uncertainty_alerts": True,
     "uncertainty_sigmas": 2.0,      # how many sigma counts as "can't rule out".
                                     # 1.0 is tight and still misses real ones;
@@ -395,6 +406,8 @@ class LunarTransitEngine:
         self.sim = None             # synthetic aircraft for end-to-end testing
         self.best = None            # cached best-dates for the current month
         self._mer_warned = False    # meridian heads-up already sent this pass
+        self._flip_done = False     # one auto-flip attempt per crossing
+        self._flip_running = False
         self.horizon = None         # local-horizon profile [(az, alt), ...]
         self._hrz_mtime = None
         self._eph = None
@@ -554,6 +567,36 @@ class LunarTransitEngine:
         ra, _dec, _d = site.at(t).observe(self._moon).apparent().radec()
         lst = (t.gmst + observer.lon / 15.0) % 24.0
         return (lst - ra.hours + 12.0) % 24.0 - 12.0
+
+    # ---- hooks used by the automatic meridian flip -------------------------
+    def moon_radec_at(self, unix_time):
+        """Apparent topocentric RA (hours) / Dec (degrees) at a unix time.
+
+        The flip slews to where the Moon WILL be when the slew finishes -- it
+        moves ~33 arcsec/min, so a 90 s flip is ~0.8 arcmin of lead.
+        """
+        from skyfield.api import wgs84
+        from datetime import datetime, timezone
+        cfg = self.cfg()
+        obs = Observer(cfg["home_lat"], cfg["home_lon"], cfg["home_alt_m"])
+        site = self._earth + wgs84.latlon(obs.lat, obs.lon, elevation_m=obs.alt_m)
+        t = self._ts.from_datetime(
+            datetime.fromtimestamp(unix_time, tz=timezone.utc))
+        ra, dec, _d = site.at(t).observe(self._moon).apparent().radec()
+        return float(ra.hours), float(dec.degrees)
+
+    def moon_angular_diameter_arcsec(self):
+        """Current apparent diameter -- the ruler that turns the disc's pixel
+        size into an image scale, so no focal length or pixel size is needed."""
+        snap = self.snapshot()
+        r = (snap.get("moon") or {}).get("radius_deg")
+        if not r:
+            raise RuntimeError("moon radius not available yet")
+        return 2.0 * float(r) * 3600.0
+
+    def moon_illum_now(self):
+        snap = self.snapshot()
+        return float((snap.get("moon") or {}).get("illum") or 0.0)
 
     def sun_azel(self, observer, unix_time):
         """Sun topocentric az/el (used for 3D moon-phase lighting)."""
@@ -789,7 +832,30 @@ class LunarTransitEngine:
         # re-arm once the Moon is comfortably away from the crossing again
         if to_mer > warn_min + 10.0 or to_mer < -90.0:
             self._mer_warned = False
+            self._flip_done = False
             return
+
+        # --- automatic flip, ahead of the mount's own limit ----------------
+        if (cfg.get("auto_flip") and moon_above_min and not self._flip_done
+                and not self._flip_running
+                and 0.0 < to_mer <= float(cfg.get("flip_lead_min", 3.0))):
+            if not cfg.get("capture_enabled") or not cfg.get("capture_host"):
+                self.log_event("flip", "auto_flip is on but no capture_host — "
+                                       "cannot reach the mount", ok=False)
+                self._flip_done = True
+            else:
+                import meridian_flip
+                self._flip_running = True
+                self._flip_done = True       # one attempt per crossing
+                self.notify(cfg, "🔭 <b>AUTO MERIDIAN FLIP</b> starting — "
+                                 "capture paused, mount slewing.")
+
+                def _done(ok):
+                    self._flip_running = False
+                    self.notify(cfg, "🔭 flip %s" % ("complete — tracking the "
+                                "Moon again" if ok else "FAILED — take manual "
+                                "control of the mount"))
+                meridian_flip.start(cfg, self, self.log_event, _done)
         if (self._mer_warned or not moon_above_min
                 or to_mer <= 0.0 or to_mer > warn_min):
             return

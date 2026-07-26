@@ -173,6 +173,11 @@ machine. You can also change the site live from the dashboard (📍 SITE control
 | `adsb_pos_sigma_m` / `lag_sigma_s` / `site_alt_sigma_m` | `20` / `0.25` / `10` | Error-budget inputs. |
 | `manual_capture_max_s` | `300` | Safety auto-stop for a manual recording. |
 | `meridian_warn_min` | `20` | Warn this many minutes before the Moon reaches the meridian (0 disables). |
+| `auto_flip` | `false` | Perform the meridian flip automatically. **Commands real mount motion.** |
+| `flip_lead_min` | `3` | Start the flip this many minutes before the crossing. |
+| `flip_slew_s` | `90` | Expected slew time — the Moon's lead is computed from it. |
+| `centre_tol_arcsec` / `centre_max_iter` | `90` / `6` | Closed-loop centring tolerance and iteration cap. |
+| `min_illum_for_centring` | `0.35` | Below this the lit centroid isn't a reliable disc centre; the flip is skipped. |
 | `telegram_enabled` | `false` | Master switch for Telegram alerts. |
 | `telegram_bot_token` | `""` | From [@BotFather](https://t.me/BotFather). **Never commit — it stays in the git-ignored `config.json`.** |
 | `telegram_chat_id` | `""` | Your chat id (e.g. via @userinfobot). |
@@ -259,6 +264,28 @@ LunarTransit therefore warns (Telegram + event log + a MERIDIAN countdown on
 `/lunar`) `meridian_warn_min` minutes before the crossing, so you can flip while
 it is cheap. `/api/lunar` exposes `moon.ha_h` and `moon.to_meridian_min` if you
 want to drive your own automation from it.
+
+LunarTransit can also do the flip itself (`auto_flip`), which is the autonomous
+path: it stops the capture, slews across the meridian to where the Moon **will
+be** when the slew finishes, verifies the pier side actually changed, restores
+lunar-rate tracking, and then **closes the loop on the Moon's own disc** until
+it is centred.
+
+That last step matters. With imperfect polar alignment the pointing error
+depends on pier side, so it reverses across a flip and roughly doubles — a
+blind GOTO back to the same coordinates does *not* land on the same spot. Plate
+solving cannot help either, since a lunar exposure shows no stars. Using the
+Moon as its own reference sidesteps all of it, and the same routine gives you a
+reliable "centre the Moon" at any time.
+
+Two calibrations happen automatically: **plate scale** comes from the Moon's
+known angular diameter versus its measured pixel diameter (no focal length or
+pixel size needed), and **camera rotation** from two small probe slews.
+
+It refuses rather than guesses: if the mount says a GOTO would not change pier
+side, if the pier side does not actually change, if the disc cannot be found,
+or if the Moon is too thin a crescent for its lit centroid to be a trustworthy
+centre.
 
 SharpCap can perform the flip itself — the sequencer has a *Meridian Flip the
 mount* step — but it is marked **experimental** and does not handle
