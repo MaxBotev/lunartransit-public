@@ -58,6 +58,8 @@ LUNAR_HTML = r"""<!DOCTYPE html>
   td{padding:5px 8px;border-bottom:1px dashed var(--line);white-space:nowrap;}
   tr.transit td{color:var(--red);}
   tr.transit td:first-child{font-weight:700;}
+  tr.possible td{color:#ff8c3c;}
+  tr.possible td:first-child{font-weight:700;}
   tr.watch td{color:var(--amber);}
   tr.sim td:first-child::after{content:" ⦿SIM";color:var(--cyan);font-size:10px;}
   .stat{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--line);}
@@ -68,6 +70,7 @@ LUNAR_HTML = r"""<!DOCTYPE html>
   .ev{display:grid;grid-template-columns:52px 1fr;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);}
   .ev .t{color:var(--dim);}
   .ev.transit .x{color:var(--red);} .ev.watch .x{color:var(--amber);}
+  .ev.possible .x{color:#ff8c3c;}
   .ev.capture .x{color:var(--green);} .ev.sim .x{color:var(--cyan);}
   .muted{color:var(--dim);}
   .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
@@ -203,8 +206,8 @@ function drawScope(){
   // candidate paths + markers
   for (const c of (D.candidates || [])){
     if (!c.path) continue;
-    const col = c.transit ? 'rgba(255,77,109,.9)' : c.watch ? 'rgba(255,204,77,.8)' : 'rgba(93,122,156,.6)';
-    ctx.strokeStyle = col; ctx.lineWidth = c.transit ? 2 : 1;
+    const col = c.transit ? 'rgba(255,77,109,.9)' : c.possible ? 'rgba(255,140,60,.9)' : c.watch ? 'rgba(255,204,77,.8)' : 'rgba(93,122,156,.6)';
+    ctx.strokeStyle = col; ctx.lineWidth = (c.transit || c.possible) ? 2 : 1;
     ctx.beginPath();
     let started = false;
     for (const [px, py] of c.path){
@@ -288,17 +291,17 @@ function render(){
                            : 'capture_enabled is false in config.json';
   }
 
-  const anyTransit = (D.candidates || []).some(c => c.transit);
+  const anyTransit = (D.candidates || []).some(c => c.transit || c.possible);
   document.getElementById('pillHot').style.display = anyTransit ? '' : 'none';
 
   document.getElementById('nTracked').textContent = D.n_tracked + ' tracked';
   const rows = (D.candidates || []).slice(0, 14).map(c =>
-    `<tr class="${c.transit ? 'transit' : c.watch ? 'watch' : ''}${c.sim ? ' sim' : ''}">
+    `<tr class="${c.transit ? 'transit' : c.possible ? 'possible' : c.watch ? 'watch' : ''}${c.sim ? ' sim' : ''}">
       <td>${c.flight}</td><td>${c.alt_ft.toLocaleString()}</td><td>${c.gs_kt}</td>
       <td>${c.az.toFixed(0)}° / ${c.el.toFixed(1)}°</td>
       <td>${c.sep_now.toFixed(2)}°</td><td>${c.min_sep.toFixed(3)}°</td>
       <td>${fmtTca(c.tca_unix, D.now)}</td>
-      <td>${c.transit ? '⦿ TRANSIT' : c.watch ? '◑ NEAR MISS' : '—'}</td>
+      <td>${c.transit ? '⦿ TRANSIT' : c.possible ? `◍ POSSIBLE ±${(c.sigma_deg||0).toFixed(2)}°` : c.watch ? '◑ NEAR MISS' : '—'}</td>
     </tr>`).join('');
   document.getElementById('candRows').innerHTML =
     rows || '<tr><td colspan="8" class="muted">no aircraft in range</td></tr>';

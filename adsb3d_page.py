@@ -1219,7 +1219,7 @@ const ALARM_MS = 60000;
 function scanTransitAlarms(d){
   const now = Date.now();
   for (const e of (d.events || [])){
-    if (e.kind !== 'transit' || !e.hex) continue;
+    if ((e.kind !== 'transit' && e.kind !== 'possible') || !e.hex) continue;
     const until = e.t * 1000 + ALARM_MS;
     if (until <= now) continue;
     const p = planes.get(e.hex);

@@ -110,6 +110,20 @@ DEFAULTS = {
     "capture_pre_s": 20.0,
     "capture_post_s": 20.0,
     "manual_capture_max_s": 300.0,  # safety auto-stop for a manual recording
+    # --- uncertainty-aware alerting ------------------------------------------
+    # A hard threshold is wrong for close targets: at 2 km a 0.3 s timing slip
+    # is 0.8 deg, more than twice the lunar disc, so real transits get reported
+    # as misses. These feed a per-target error bar; a transit inside that bar
+    # is announced as POSSIBLE rather than silently dropped.
+    "uncertainty_alerts": True,
+    "uncertainty_sigmas": 2.0,      # how many sigma counts as "can't rule out".
+                                    # 1.0 is tight and still misses real ones;
+                                    # 2.0 (~95%) caught the observed close
+                                    # approaches. Raise for a wider net.
+    "capture_on_possible": True,    # arm the recorder for uncertain ones too
+    "adsb_pos_sigma_m": 20.0,       # ADS-B horizontal position error (1 sigma)
+    "lag_sigma_s": 0.25,            # residual timing error after lag correction
+    "site_alt_sigma_m": 10.0,       # residual observer-height error
     "horizon_file": "",             # NINA-format local horizon (optional)
     "horizon_margin_deg": 10.0,      # lower the effective horizon by this many
                                     # deg for ALERTS (bigger = less strict; the
@@ -171,6 +185,17 @@ class Observer:
         d = np.atleast_2d(ecef_pts) - self.ecef
         v = d @ self.enu.T
         return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+    def unit_and_range(self, ecef_pts):
+        """As unit_vectors, but also the slant range (m) to each point.
+
+        Range drives the error budget: a fixed metres-scale position error is
+        a big angle up close and a negligible one far away.
+        """
+        d = np.atleast_2d(ecef_pts) - self.ecef
+        v = d @ self.enu.T                      # ENU rotation preserves length
+        r = np.linalg.norm(v, axis=-1, keepdims=True)
+        return v / r, r[:, 0]
 
     @staticmethod
     def azel(unit):
@@ -697,6 +722,32 @@ class LunarTransitEngine:
         v = moon["u0"][None, :] * (1 - f) + moon["u1"][None, :] * f
         return v / np.linalg.norm(v, axis=1, keepdims=True)
 
+    @staticmethod
+    def pointing_sigma(cfg, u, rng, el_all, times, t_min):
+        """1-sigma angular uncertainty (deg) on a target's sky position at TCA.
+
+        Three terms, combined in quadrature:
+          * timing   -- residual lag after compensation, times the target's own
+                        angular rate. Dominates for close, fast aircraft.
+          * position -- ADS-B horizontal error, as an angle at the slant range.
+          * height   -- residual observer-height error, likewise.
+
+        All three scale as 1/range, which is why a transit that is trivially
+        resolvable at 30 km is unresolvable at 2 km.
+        """
+        n = len(times)
+        i = int(min(max(round(float(t_min) / max(STEP_S, 1e-6)), 0), n - 1))
+        r_m = float(max(rng[i], 1.0))
+        # target's angular rate from a central difference of its sky track
+        j = int(min(max(i, 1), n - 2))
+        dot = float(np.clip(np.dot(u[j - 1], u[j + 1]), -1.0, 1.0))
+        omega = math.degrees(math.acos(dot)) / (2.0 * STEP_S)
+        sig_t = omega * float(cfg.get("lag_sigma_s", 0.25))
+        sig_p = math.degrees(float(cfg.get("adsb_pos_sigma_m", 20.0)) / r_m)
+        sig_h = math.degrees(float(cfg.get("site_alt_sigma_m", 10.0))
+                             * math.cos(math.radians(float(el_all[i]))) / r_m)
+        return math.sqrt(sig_t * sig_t + sig_p * sig_p + sig_h * sig_h)
+
     def step(self, cfg, observer, moon, now):
         transit_deg = moon["radius_deg"] + cfg["lunar_margin_deg"]
         watch_deg = cfg["lunar_watch_deg"]
@@ -760,13 +811,14 @@ class LunarTransitEngine:
                 a["lat"], a["lon"], a["alt_ft"] * FT_TO_M,
                 a["gs_kt"] * KT_TO_MS, a["track"],
                 (a["vrate_fpm"] or 0) * FT_TO_M / 60.0, times + lag)
-            u = observer.unit_vectors(geodetic_to_ecef(lat, lon, alt))
+            u, rng = observer.unit_and_range(geodetic_to_ecef(lat, lon, alt))
             el_now = math.degrees(math.asin(max(-1, min(1, u[0, 2]))))
             if el_now < -2:
                 continue
             sep = np.degrees(np.arccos(np.clip(np.sum(u * moon_u, axis=1), -1, 1)))
             min_sep, t_min = refine_min_sep(times, sep)
             az_all, el_all = Observer.azel(u)
+            sigma = self.pointing_sigma(cfg, u, rng, el_all, times, t_min)
             r = {
                 "hex": a["hex"], "flight": a["flight"] or a["hex"],
                 "sim": bool(a.get("sim")),
@@ -778,7 +830,15 @@ class LunarTransitEngine:
                 "tca_unix": float(now + t_min),
                 "lag_s": round(lag, 1),
                 "baro_only": bool(a.get("baro_only")),
+                "sigma_deg": round(sigma, 3),
                 "transit": bool(min_sep <= transit_deg),
+                # inside the error bar: can't be called either way, so say so
+                # rather than reporting a confident miss
+                "possible": bool(cfg.get("uncertainty_alerts", True)
+                                 and min_sep > transit_deg
+                                 and min_sep - sigma * float(
+                                     cfg.get("uncertainty_sigmas", 2.0))
+                                 <= transit_deg),
                 "watch": bool(min_sep <= watch_deg),
             }
             if min_sep <= PATH_ZONE_DEG:
@@ -866,6 +926,28 @@ class LunarTransitEngine:
                         f"alt {r['alt_ft']:,} ft · {r['gs_kt']} kt · "
                         f"az {r['az']}° el {r['el']}°\n"
                         f"📹 capture {'armed' if cfg['capture_enabled'] else 'DISABLED'}"
+                        f"{' [SIM]' if r['sim'] else ''}")
+            elif r.get("possible"):
+                if cfg.get("capture_on_possible", True):
+                    self.capture.arm(r["hex"], r["tca_unix"],
+                                     cfg["capture_pre_s"], cfg["capture_post_s"])
+                if "possible" not in st and "transit" not in st:
+                    st["possible"] = now
+                    self.log_event("possible",
+                                   f"{r['flight']} POSSIBLE transit — min sep "
+                                   f"{r['min_sep']:.2f}° ± {r['sigma_deg']:.2f}° "
+                                   f"in {r['eta_s']}s", **{
+                                       k: r[k] for k in ("hex", "min_sep",
+                                                         "sigma_deg", "eta_s")})
+                    self.notify(cfg,
+                        f"🌗✈️ <b>POSSIBLE LUNAR TRANSIT</b>\n"
+                        f"<b>{r['flight']}</b> in <b>~{r['eta_s']}s</b>\n"
+                        f"min sep {r['min_sep']:.2f}° ± {r['sigma_deg']:.2f}° "
+                        f"(disc+margin {transit_deg:.3f}°)\n"
+                        f"too close to call — {r['alt_ft']:,} ft · {r['gs_kt']} kt · "
+                        f"az {r['az']}° el {r['el']}°\n"
+                        f"📹 capture "
+                        f"{'armed' if (cfg['capture_enabled'] and cfg.get('capture_on_possible', True)) else 'DISABLED'}"
                         f"{' [SIM]' if r['sim'] else ''}")
             elif r["watch"] and "watch" not in st and "transit" not in st:
                 st["watch"] = now

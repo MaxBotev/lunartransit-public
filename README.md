@@ -167,6 +167,11 @@ machine. You can also change the site live from the dashboard (📍 SITE control
 | `capture_enabled` | `false` | Enable the SharpCap TCP trigger. |
 | `capture_host` / `capture_port` | `127.0.0.1` / `5580` | Where the SharpCap listener runs. |
 | `capture_pre_s` / `capture_post_s` | `20` / `20` | Record from T−pre to T+post around closest approach. |
+| `uncertainty_alerts` | `true` | Announce transits that fall inside the per-target error bar as POSSIBLE. |
+| `uncertainty_sigmas` | `2.0` | Width of that error bar in sigma (≈95%). |
+| `capture_on_possible` | `true` | Arm the recorder for POSSIBLE transits too, not just confident ones. |
+| `adsb_pos_sigma_m` / `lag_sigma_s` / `site_alt_sigma_m` | `20` / `0.25` / `10` | Error-budget inputs. |
+| `manual_capture_max_s` | `300` | Safety auto-stop for a manual recording. |
 | `telegram_enabled` | `false` | Master switch for Telegram alerts. |
 | `telegram_bot_token` | `""` | From [@BotFather](https://t.me/BotFather). **Never commit — it stays in the git-ignored `config.json`.** |
 | `telegram_chat_id` | `""` | Your chat id (e.g. via @userinfobot). |
@@ -291,6 +296,32 @@ Remaining error sources are an order of magnitude smaller: barometric altitude
 for contacts without `alt_geom` (flagged as low-confidence in alerts), and
 dead-reckoning curvature (~0.01° at the moment of decision). Both sit inside the
 default 0.10° margin.
+
+### Range decides what is knowable
+
+Every remaining error scales as 1/range, so the same setup that resolves a
+transit cleanly at 30 km cannot resolve one at 2 km:
+
+| slant range | typical target | angular rate | 1σ pointing error |
+|---|---|---|---|
+| 40 km | cruise, 35 kft | 0.1 °/s | ~0.08° |
+| 12 km | mid-level, 10 kft | 0.4 °/s | ~0.18° |
+| 2 km | on approach, 2.7 kft | 2.8 °/s | **~0.82°** |
+
+The lunar disc is 0.52° across, so at 2 km the error bar is bigger than the
+Moon: ADS-B simply cannot say whether a low, close aircraft will cross it.
+Rather than report a confident miss, the engine computes a per-target error bar
+from range, angular rate and report lag, and announces anything that could be a
+transit as **POSSIBLE — min sep 1.5° ± 0.8°**. Tune with `uncertainty_sigmas`
+(default 2, ≈95%), or set `uncertainty_alerts` false for strict behaviour.
+
+⚠️ **`home_alt_m` must be ellipsoidal height (HAE), not MSL.** ADS-B `alt_geom`
+is referenced to the WGS-84 ellipsoid, so the observer must be too. Map and
+phone elevations are orthometric/MSL; in the SF Bay Area the geoid sits ~32 m
+*below* the ellipsoid, so an MSL figure entered directly puts the observer 32 m
+too high — harmless at cruise, but **0.87° of systematic error at 2 km**, in the
+same direction every time. Subtract your local geoid undulation before entering
+it.
 
 Predictions are suspended entirely if the ADS-B feed goes stale (>15 s), so a
 dead receiver can't arm a capture on frozen positions.
