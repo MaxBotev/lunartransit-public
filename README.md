@@ -291,6 +291,13 @@ geometry: a German equatorial sits **west** of the pier while the target is
 east of the meridian, and **east** of it afterwards. The post-flip check that
 `SideOfPier` actually changed always applies — that property *is* implemented.
 
+Pier-side strings are normalised, because drivers spell the same enum at least
+three ways: ASCOM's `pierWest`/`pierEast`, plain `West`/`East`, and the
+*pointing state* names `ThroughThePole`/`Normal` (what the AM5N reports, and
+what the spec's own wording describes). An exact compare against `pierWest`
+silently never matches on such a driver, which would make every flip
+unverifiable.
+
 Two calibrations happen automatically: **plate scale** comes from the Moon's
 known angular diameter versus its measured pixel diameter (no focal length or
 pixel size needed), and **camera rotation** from two small probe slews.

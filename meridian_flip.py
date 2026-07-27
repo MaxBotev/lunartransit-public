@@ -199,7 +199,12 @@ class Flipper:
                             "reliable disc centre; flip skipped" % (100 * illum))
 
         st = _kv(self.cmd("MOUNT"))
-        pier_before = st.get("pier", "?")
+        # prefer the listener's decoded W/E; drivers spell the raw enum in at
+        # least three different ways (West / pierWest / ThroughThePole)
+        pier_before = st.get("side") or st.get("pier", "?")
+        if pier_before == "?":
+            raise FlipError("mount reports an unknown pier side (%s) — a flip "
+                            "cannot be verified from here" % st.get("pier"))
         self.say("flip starting (pier %s, HA %+.2f h)" % (
             pier_before, float(st.get("ha", 0.0))))
 
@@ -216,7 +221,7 @@ class Flipper:
         self.say(reply[3:].strip())
 
         st = _kv(self.cmd("MOUNT"))
-        if st.get("pier") == pier_before:
+        if (st.get("side") or st.get("pier")) == pier_before:
             raise FlipError("pier side unchanged (%s) — flip did not happen"
                             % pier_before)
 
@@ -231,10 +236,11 @@ class Flipper:
         err = self.centre()
 
         st = _kv(self.cmd("MOUNT"))
+        pier_after = st.get("side") or st.get("pier")
         self.say("flip complete: pier %s -> %s, centred to %.0f arcsec, "
-                 "tracking=%s rate=%s" % (pier_before, st.get("pier"), err,
+                 "tracking=%s rate=%s" % (pier_before, pier_after, err,
                                           st.get("tracking"), st.get("rate")),
-                 pier_from=pier_before, pier_to=st.get("pier"),
+                 pier_from=pier_before, pier_to=pier_after,
                  residual_arcsec=round(err, 1))
         return True
 

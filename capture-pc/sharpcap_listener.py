@@ -55,14 +55,33 @@ def _pier(a):
 def _pier_norm(s):
     """Normalise a pier-side string to 'W' / 'E' / '?'.
 
-    Drivers spell the PierSide enum differently -- ASCOM's constants are
-    pierWest/pierEast, but this one prints plain 'West'/'East'/'Unknown'
-    (same as its DriveRates printing 'Sidereal' rather than 'driveSidereal').
+    Drivers spell the PierSide enum three different ways and all show up in
+    the wild, so match on meaning rather than on any one spelling:
+
+      ASCOM constants     pierWest / pierEast
+      plain side names    West / East / Unknown
+      POINTING STATE      ThroughThePole / Normal   <-- the ZWO AM5N does this
+
+    The last one is what the ASCOM spec actually says the values mean:
+    pierEast is the "normal pointing state" and pierWest the "through the pole
+    pointing state". Naming the members after the state rather than the side
+    is legal, and an exact string compare against "pierWest" silently never
+    matches -- which would make every flip unverifiable.
     """
-    s = (s or "").lower()
+    s = (s or "").strip().lower()
+    if not s:
+        return "?"
+    if s in ("1", "pierwest"):
+        return "W"
+    if s in ("0", "piereast"):
+        return "E"
     if "west" in s:
         return "W"
     if "east" in s:
+        return "E"
+    if "pole" in s:                 # ThroughThePole == pierWest
+        return "W"
+    if "normal" in s:               # Normal == pierEast
         return "E"
     return "?"
 
@@ -88,9 +107,10 @@ def mount_state():
     """MOUNT — one line of everything the orchestrator needs to decide."""
     try:
         a = _mount()
-        return ("OK ra=%.6f dec=%.6f pier=%s ha=%.5f lst=%.6f tracking=%s "
+        raw = _pier(a)
+        return ("OK ra=%.6f dec=%.6f pier=%s side=%s ha=%.5f lst=%.6f tracking=%s "
                 "rate=%s slewing=%s canpulse=%s canflip=%s" % (
-                    a.RightAscension, a.Declination, _pier(a),
+                    a.RightAscension, a.Declination, raw, _pier_norm(raw),
                     (a.SiderealTime - a.RightAscension + 12.0) % 24.0 - 12.0,
                     a.SiderealTime, a.Tracking, a.TrackingRate, a.Slewing,
                     a.CanPulseGuide, a.CanSetPierSide))
