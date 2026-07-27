@@ -205,8 +205,17 @@ class Flipper:
         if pier_before == "?":
             raise FlipError("mount reports an unknown pier side (%s) — a flip "
                             "cannot be verified from here" % st.get("pier"))
-        self.say("flip starting (pier %s, HA %+.2f h)" % (
-            pier_before, float(st.get("ha", 0.0))))
+        tracking = str(st.get("tracking", "")).lower() == "true"
+        self.say("flip starting (pier %s, HA %+.2f h, tracking=%s)" % (
+            pier_before, float(st.get("ha", 0.0)), st.get("tracking")))
+        if not tracking:
+            # Not fatal: some mounts are configured to stop tracking AT the
+            # meridian, so arriving here with motors already stopped is normal.
+            # The Moon has been drifting since (~15 arcsec/s), but the slew
+            # below targets its ephemeris position, so it gets re-acquired.
+            self.say("note: mount was NOT tracking when the flip began — it "
+                     "likely hit its own meridian limit already; re-acquiring "
+                     "the Moon from the ephemeris")
 
         try:
             self.cmd("STOP", timeout=30.0)     # never flip mid-recording
