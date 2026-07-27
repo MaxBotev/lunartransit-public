@@ -104,6 +104,13 @@ def slew_to(arg, force_flip=False):
             return "ERR mount is parked"
         before = _pier(a)
         if force_flip:
+            # An unknown starting side makes the whole flip unverifiable: the
+            # "did the side change?" check below would pass vacuously. Refuse.
+            # (The mount reports Unknown at the home position, Dec +90, where
+            # pier side is geometrically meaningless.)
+            if before in ("Unknown", "?", "pierUnknown"):
+                return ("ERR refusing: mount reports pier side %s (parked/at "
+                        "home?) — a flip cannot be verified from here" % before)
             try:
                 dest = str(a.DestinationSideOfPier(ra, dec))
             except Exception as e:
@@ -168,29 +175,76 @@ def nudge(arg):
 
 
 def set_tracking(arg):
-    """TRACK ON|OFF [LUNAR|SIDEREAL|SOLAR]"""
+    """TRACK ON|OFF [LUNAR|SIDEREAL|SOLAR]
+
+    Drivers disagree on how the DriveRates enum is spelled -- the ASCOM
+    constants are driveSidereal/driveLunar/..., but this mount's enum prints
+    as plain "Sidereal". So match case-insensitively on a substring of the
+    actual member names rather than assuming either spelling.
+
+    Enabling tracking is the critical part and is reported as an error if it
+    fails; the RATE is best-effort, because after a flip it is far better to
+    be tracking at the wrong rate (and centring) than not tracking at all.
+    """
     parts = arg.split()
     if not parts:
         return "ERR usage: TRACK ON|OFF [LUNAR|SIDEREAL|SOLAR]"
     want = parts[0].upper() in ("ON", "1", "TRUE")
+    warn = ""
     try:
         a = _mount()
         if len(parts) > 1:
-            import System
-            names = {"SIDEREAL": "driveSidereal", "LUNAR": "driveLunar",
-                     "SOLAR": "driveSolar", "KING": "driveKing"}
-            key = names.get(parts[1].upper())
-            if key:
-                try:
-                    a.TrackingRate = System.Enum.Parse(
-                        a.TrackingRate.GetType(), key)
-                except Exception as e:
-                    return "ERR tracking rate: %s" % e
+            wanted = parts[1].strip().lower()
+            try:
+                import System
+                enum_t = a.TrackingRate.GetType()
+                names = list(System.Enum.GetNames(enum_t))
+                pick = None
+                for n in names:
+                    if wanted in n.lower():
+                        pick = n
+                        break
+                if pick is None:
+                    warn = " (rate %r not available; have: %s)" % (
+                        wanted, ",".join(names))
+                else:
+                    a.TrackingRate = System.Enum.Parse(enum_t, pick)
+            except Exception as e:
+                warn = " (rate not set: %s)" % e
         a.Tracking = want
         time.sleep(0.5)
         if bool(a.Tracking) != want:
-            return "ERR mount refused tracking=%s (past a meridian limit?)" % want
-        return "OK tracking=%s rate=%s" % (a.Tracking, a.TrackingRate)
+            return ("ERR mount refused tracking=%s (past a meridian limit?)"
+                    % want)
+        return "OK tracking=%s rate=%s%s" % (a.Tracking, a.TrackingRate, warn)
+    except Exception as e:
+        return "ERR " + str(e)
+
+
+def pier_check(arg):
+    """PIERCHK <ra_hours> <dec_deg> — READ ONLY.
+
+    Asks the driver which side of the pier a GOTO to those coordinates would
+    end on. The whole flip design hinges on this being implemented: many
+    drivers that report CanSetPierSide=False also throw on
+    DestinationSideOfPier, and this reports that without moving anything.
+    """
+    try:
+        ra_s, dec_s = arg.split()
+        ra, dec = float(ra_s), float(dec_s)
+    except Exception:
+        return "ERR usage: PIERCHK <ra_hours> <dec_deg>"
+    try:
+        a = _mount()
+        now = _pier(a)
+        try:
+            dest = str(a.DestinationSideOfPier(ra, dec))
+        except Exception as e:
+            return ("ERR DestinationSideOfPier not usable: %s "
+                    "(current pier=%s) — automatic flip cannot verify itself"
+                    % (e, now))
+        return "OK current=%s destination=%s would_flip=%s" % (
+            now, dest, "yes" if (dest != now and now != "Unknown") else "no")
     except Exception as e:
         return "ERR " + str(e)
 
@@ -409,6 +463,8 @@ def handle(conn, addr):
             reply = set_tracking(arg)
         elif cmd == "MOONPOS":
             reply = moon_position(arg)
+        elif cmd == "PIERCHK":
+            reply = pier_check(arg)
         elif cmd == "TEMP":
             reply = focuser_info()
         elif cmd == "FPOS":

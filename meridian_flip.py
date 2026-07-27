@@ -219,7 +219,14 @@ class Flipper:
             raise FlipError("pier side unchanged (%s) — flip did not happen"
                             % pier_before)
 
-        self.cmd("TRACK ON LUNAR")
+        # The mount has already moved by this point, so a rate problem must not
+        # abort the sequence — being centred at sidereal rate beats being left
+        # uncentred. Tracking being OFF is fatal, though: nothing else works.
+        try:
+            self.say(self.cmd("TRACK ON LUNAR")[3:].strip())
+        except FlipError as e:
+            self.say("WARNING: could not set lunar rate (%s) — continuing" % e)
+            self.cmd("TRACK ON")     # tracking itself is non-negotiable
         err = self.centre()
 
         st = _kv(self.cmd("MOUNT"))
