@@ -156,8 +156,15 @@ class Flipper:
 
         det = dx_ra * dy_dec - dx_dec * dy_ra
         if abs(det) < 1e-9:
-            raise FlipError("calibration degenerate — mount did not respond to "
-                            "probe slews (det=%.2e)" % det)
+            # Two very different faults look identical here, so say which.
+            same = (abs(dx_ra) + abs(dy_ra) + abs(dx_dec) + abs(dy_dec)) < 1e-9
+            raise FlipError(
+                ("the camera image did not change at all across two %.0f-arcsec "
+                 "probe slews — either the frame is stale (SharpCap returned the "
+                 "same image twice) or the mount ignored the slews"
+                 % step) if same else
+                ("calibration degenerate: probe slews moved the disc along one "
+                 "axis only (det=%.2e)" % det))
         # invert [[dx_ra, dx_dec], [dy_ra, dy_dec]]
         self.rot = (dy_dec / det, -dx_dec / det, -dy_ra / det, dx_ra / det)
         self.say("centring calibrated: 1 arcsec RA = (%.3f,%.3f) px, "

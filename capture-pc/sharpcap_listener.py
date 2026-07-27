@@ -337,12 +337,53 @@ def pier_check(arg):
         return "ERR " + str(e)
 
 
+def _grab_frame(cam, path, timeout=25.0):
+    """Capture ONE fresh frame to `path`, or explain why not.
+
+    CaptureSingleFrameTo can return without writing anything (and can block
+    outright when the camera is not live). Analysing whatever happens to be on
+    disk then silently measures a stale image -- which is exactly how a flip
+    "succeeded" against a frame captured two hours earlier. So: remove the old
+    file first, bound the call, and require a new one to exist afterwards.
+    """
+    import os
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        return "cannot clear the old frame (%s) -- is it open elsewhere?" % e
+
+    box = {}
+
+    def _cap():
+        try:
+            cam.CaptureSingleFrameTo(path)
+            box["done"] = True
+        except Exception as e:
+            box["err"] = str(e)
+
+    t = threading.Thread(target=_cap)
+    t.setDaemon(True)
+    t.start()
+    t.join(timeout)
+    if t.isAlive():
+        # Leave the thread; the listener must stay responsive for STOP/MOUNT.
+        return ("frame capture did not return within %.0fs -- is the camera "
+                "running (live view) in SharpCap?" % timeout)
+    if "err" in box:
+        return "capture failed: %s" % box["err"]
+    if not os.path.exists(path):
+        return ("capture reported success but wrote no file -- camera not "
+                "live, or the path is not writable")
+    return None
+
+
 def moon_position(arg):
-    """MOONPOS — snap a frame and locate the lunar disc in it.
+    """MOONPOS — snap a FRESH frame and locate the lunar disc in it.
 
     Returns the bounding box of the lit region. Its centre is the disc centre
     for a gibbous/full Moon, and its LONGEST side is the full diameter at any
-    phase (the terminator only cuts the short axis) — which lets the caller
+    phase (the terminator only cuts the short axis) -- which lets the caller
     derive arcsec/pixel from the Moon's known angular size, with no focal
     length or pixel size needed.
     """
@@ -351,29 +392,56 @@ def moon_position(arg):
         if cam is None:
             return "ERR no camera"
         path = arg or SNAP_PATH
-        cam.CaptureSingleFrameTo(path)
+        why = _grab_frame(cam, path)
+        if why:
+            return "ERR " + why
+
         import clr
         clr.AddReference("System.Drawing")
-        from System.Drawing import Bitmap
+        from System.Drawing import Bitmap, Rectangle
+        from System.Drawing.Imaging import ImageLockMode, PixelFormat
+        from System.Runtime.InteropServices import Marshal
+        from System import Array, Byte
+
         bmp = Bitmap(path)
         try:
             w, h = bmp.Width, bmp.Height
-            step = max(1, int(max(w, h) / 240))     # ~240 samples on the long axis
+            # GetPixel per sample is ~60x slower here; lock the bits once and
+            # walk raw bytes instead. A full-frame scan was taking a minute.
+            rect = Rectangle(0, 0, w, h)
+            bd = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb)
+            try:
+                stride = bd.Stride
+                buf = Array.CreateInstance(Byte, stride * h)
+                Marshal.Copy(bd.Scan0, buf, 0, stride * h)
+            finally:
+                bmp.UnlockBits(bd)
+
+            step = max(1, int(max(w, h) / 240))
             peak = 0
-            for y in range(0, h, step):
-                for x in range(0, w, step):
-                    v = bmp.GetPixel(x, y).R
+            y = 0
+            while y < h:
+                row = y * stride
+                x = 0
+                while x < w:
+                    v = buf[row + x * 3 + 2]      # BGR -> red channel
                     if v > peak:
                         peak = v
+                    x += step
+                y += step
             if peak < 25:
-                return "ERR frame is blank (peak=%d) — Moon not in field?" % peak
+                return "ERR frame is blank (peak=%d) -- Moon not in field?" % peak
+
             thr = peak * 0.45
             n = 0
             sx = sy = 0
             x0, y0, x1, y1 = w, h, -1, -1
-            for y in range(0, h, step):
-                for x in range(0, w, step):
-                    if bmp.GetPixel(x, y).R >= thr:
+            y = 0
+            while y < h:
+                row = y * stride
+                x = 0
+                while x < w:
+                    if buf[row + x * 3 + 2] >= thr:
                         n += 1
                         sx += x
                         sy += y
@@ -381,8 +449,10 @@ def moon_position(arg):
                         if y < y0: y0 = y
                         if x > x1: x1 = x
                         if y > y1: y1 = y
+                    x += step
+                y += step
             if n < 12:
-                return "ERR only %d lit samples — no disc found" % n
+                return "ERR only %d lit samples -- no disc found" % n
             return ("OK cx=%.1f cy=%.1f bx0=%d by0=%d bx1=%d by1=%d "
                     "w=%d h=%d n=%d peak=%d step=%d" % (
                         float(sx) / n, float(sy) / n, x0, y0, x1, y1,
