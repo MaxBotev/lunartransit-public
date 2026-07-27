@@ -131,7 +131,7 @@ DEFAULTS = {
     "flip_after_min": 2.0,          # start this long past the meridian
     "flip_before_limit_min": 12.0,  # give up beyond this — limit territory
     "flip_slew_s": 90.0,
-    "centre_tol_arcsec": 90.0,
+    "centre_tol_arcsec": 40.0,
     "centre_max_iter": 6,
     "calib_step_arcsec": 300.0,
     "min_illum_for_centring": 0.35,

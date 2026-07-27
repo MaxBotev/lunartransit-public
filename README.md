@@ -298,6 +298,11 @@ what the spec's own wording describes). An exact compare against `pierWest`
 silently never matches on such a driver, which would make every flip
 unverifiable.
 
+Measured on a ZWO AM5N with a 472 mm scope: centring converged from 5.6 arcmin
+to **2 arcsec in two passes, 16 s each**. The mount under-delivers commanded
+slews by about 10%, so a single correction leaves ~20% residual — hence a
+40 arcsec tolerance, which forces the second pass that closes it.
+
 Two calibrations happen automatically: **plate scale** comes from the Moon's
 known angular diameter versus its measured pixel diameter (no focal length or
 pixel size needed), and **camera rotation** from two small probe slews.

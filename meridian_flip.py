@@ -38,7 +38,9 @@ DEFAULTS = {
     "flip_after_min": 2.0,          # start this long PAST the meridian
     "flip_before_limit_min": 12.0,  # give up beyond this (mount limit ~16-18)
     "flip_slew_s": 90.0,            # expected slew duration, for Moon lead
-    "centre_tol_arcsec": 90.0,      # good enough: well inside a 1800" disc
+    "centre_tol_arcsec": 40.0,      # ~2% of the disc; the mount under-
+                                # delivers slews ~10%, so one pass leaves
+                                # ~20% residual and a second closes it
     "centre_max_iter": 6,
     "calib_step_arcsec": 300.0,     # probe size for the rotation calibration
     "min_illum_for_centring": 0.35, # below this the lit centroid is unreliable
