@@ -271,6 +271,47 @@ def set_tracking(arg):
         return "ERR " + str(e)
 
 
+def mount_caps():
+    """CAPS — READ ONLY. Driver properties that affect flip correctness.
+
+    Two matter most:
+      * EquatorialSystem — if the driver wants J2000 but we send apparent
+        (JNow) coordinates, the flip slews to the wrong place by up to ~0.3 deg.
+      * AlignmentMode    — the pier-side geometry only holds for a German
+        equatorial (algGermanPolar).
+    SupportedActions is included because vendor-specific settings such as the
+    meridian limit, which is stored in the mount rather than on the PC, are
+    only ever reachable through a custom Action if at all.
+    """
+    try:
+        a = _mount()
+        out = []
+        for name in ("EquatorialSystem", "AlignmentMode", "SlewSettleTime",
+                     "DoesRefraction", "SiteElevation", "SiteLatitude",
+                     "GuideRateRightAscension", "GuideRateDeclination",
+                     "CanSetPierSide", "CanSetTracking", "CanSlewAsync",
+                     "CanSync", "CanPulseGuide", "InterfaceVersion",
+                     "DriverVersion", "Name"):
+            try:
+                out.append("%s=%s" % (name, getattr(a, name)))
+            except Exception as e:
+                out.append("%s=<%s>" % (name, str(e)[:40]))
+        try:
+            acts = list(a.SupportedActions)
+            out.append("SupportedActions=[%s]" % ",".join(str(x) for x in acts)
+                       if acts else "SupportedActions=[]")
+        except Exception as e:
+            out.append("SupportedActions=<%s>" % str(e)[:40])
+        try:
+            rates = [str(r) for r in a.TrackingRates]
+            out.append("TrackingRates=[%s]" % ",".join(rates))
+        except Exception as e:
+            out.append("TrackingRates=<%s>" % str(e)[:40])
+        return "OK " + " ".join(out)
+    except Exception as e:
+        return "ERR " + str(e)
+
+
 def pier_check(arg):
     """PIERCHK <ra_hours> <dec_deg> — READ ONLY.
 
@@ -512,6 +553,8 @@ def handle(conn, addr):
             reply = moon_position(arg)
         elif cmd == "PIERCHK":
             reply = pier_check(arg)
+        elif cmd == "CAPS":
+            reply = mount_caps()
         elif cmd == "TEMP":
             reply = focuser_info()
         elif cmd == "FPOS":
