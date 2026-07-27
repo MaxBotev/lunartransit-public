@@ -35,7 +35,8 @@ import time
 
 DEFAULTS = {
     "auto_flip": False,             # master switch (off until deliberately armed)
-    "flip_lead_min": 3.0,           # start this long BEFORE the mount's limit
+    "flip_after_min": 2.0,          # start this long PAST the meridian
+    "flip_before_limit_min": 12.0,  # give up beyond this (mount limit ~16-18)
     "flip_slew_s": 90.0,            # expected slew duration, for Moon lead
     "centre_tol_arcsec": 90.0,      # good enough: well inside a 1800" disc
     "centre_max_iter": 6,

@@ -52,6 +52,38 @@ def _pier(a):
         return "?"
 
 
+def _pier_norm(s):
+    """Normalise a pier-side string to 'W' / 'E' / '?'.
+
+    Drivers spell the PierSide enum differently -- ASCOM's constants are
+    pierWest/pierEast, but this one prints plain 'West'/'East'/'Unknown'
+    (same as its DriveRates printing 'Sidereal' rather than 'driveSidereal').
+    """
+    s = (s or "").lower()
+    if "west" in s:
+        return "W"
+    if "east" in s:
+        return "E"
+    return "?"
+
+
+def _dest_pier(a, ra):
+    """Which side a fresh GOTO to `ra` should land on, and how we know.
+
+    Prefer the driver. Many mounts -- including this one -- do not implement
+    DestinationSideOfPier at all, so fall back to the geometry: a German
+    equatorial sits WEST of the pier looking east while the target is east of
+    the meridian (HA < 0), and EAST of the pier once it is west of the
+    meridian (HA > 0). Confirmed against this mount's own log.
+    """
+    try:
+        return _pier_norm(str(a.DestinationSideOfPier(ra, a.Declination))), "driver"
+    except Exception:
+        pass
+    ha = (a.SiderealTime - ra + 12.0) % 24.0 - 12.0
+    return ("W" if ha < 0 else "E"), "hour-angle(%.3fh)" % ha
+
+
 def mount_state():
     """MOUNT — one line of everything the orchestrator needs to decide."""
     try:
@@ -103,36 +135,36 @@ def slew_to(arg, force_flip=False):
         if a.AtPark:
             return "ERR mount is parked"
         before = _pier(a)
+        how = ""
         if force_flip:
             # An unknown starting side makes the whole flip unverifiable: the
             # "did the side change?" check below would pass vacuously. Refuse.
             # (The mount reports Unknown at the home position, Dec +90, where
             # pier side is geometrically meaningless.)
-            if before in ("Unknown", "?", "pierUnknown"):
+            if _pier_norm(before) == "?":
                 return ("ERR refusing: mount reports pier side %s (parked/at "
                         "home?) — a flip cannot be verified from here" % before)
-            try:
-                dest = str(a.DestinationSideOfPier(ra, dec))
-            except Exception as e:
-                return "ERR cannot query DestinationSideOfPier: %s" % e
-            if dest == before:
+            dest, how = _dest_pier(a, ra)
+            if dest == _pier_norm(before):
                 return ("ERR refusing: GOTO would stay on pier side %s "
-                        "(not a flip yet — too far from the meridian?)" % before)
+                        "[%s] — not past the meridian yet?" % (before, how))
         was_tracking = a.Tracking
         a.SlewToCoordinatesAsync(ra, dec)
         err = _wait_slew(a)
         if err:
             return "ERR " + err
         after = _pier(a)
-        if force_flip and after == before:
-            return "ERR slew finished but pier side is still %s — flip FAILED" % after
+        if force_flip and _pier_norm(after) == _pier_norm(before):
+            return ("ERR slew finished but pier side is still %s — flip FAILED"
+                    % after)
         if was_tracking and not a.Tracking:
             try:
                 a.Tracking = True
             except Exception:
                 pass
-        return "OK slewed ra=%.6f dec=%.6f pier %s->%s" % (
-            a.RightAscension, a.Declination, before, after)
+        return "OK slewed ra=%.6f dec=%.6f pier %s->%s%s" % (
+            a.RightAscension, a.Declination, before, after,
+            (" [dest via %s]" % how) if how else "")
     except Exception as e:
         return "ERR " + str(e)
 
@@ -159,12 +191,10 @@ def nudge(arg):
             return "ERR too close to the pole for an RA offset"
         ra_new = (a.RightAscension + dra / 3600.0 / 15.0 / cosd) % 24.0
         dec_new = max(-90.0, min(90.0, dec0 + ddec / 3600.0))
-        before = _pier(a)
-        try:
-            if str(a.DestinationSideOfPier(ra_new, dec_new)) != before:
-                return "ERR refusing nudge: it would change pier side"
-        except Exception:
-            pass                      # driver may not implement it; continue
+        before = _pier_norm(_pier(a))
+        dest, _how = _dest_pier(a, ra_new)
+        if before != "?" and dest != before:
+            return "ERR refusing nudge: it would change pier side"
         a.SlewToCoordinatesAsync(ra_new, dec_new)
         err = _wait_slew(a, timeout=60)
         if err:
@@ -237,14 +267,11 @@ def pier_check(arg):
     try:
         a = _mount()
         now = _pier(a)
-        try:
-            dest = str(a.DestinationSideOfPier(ra, dec))
-        except Exception as e:
-            return ("ERR DestinationSideOfPier not usable: %s "
-                    "(current pier=%s) — automatic flip cannot verify itself"
-                    % (e, now))
-        return "OK current=%s destination=%s would_flip=%s" % (
-            now, dest, "yes" if (dest != now and now != "Unknown") else "no")
+        dest, how = _dest_pier(a, ra)
+        cur = _pier_norm(now)
+        return "OK current=%s(%s) destination=%s via=%s would_flip=%s" % (
+            now, cur, dest, how,
+            "yes" if (cur != "?" and dest != cur) else "no")
     except Exception as e:
         return "ERR " + str(e)
 

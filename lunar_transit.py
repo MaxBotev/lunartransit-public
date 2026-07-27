@@ -124,7 +124,12 @@ DEFAULTS = {
     # to prevent. flip_lead_min is how long BEFORE the crossing to start, so
     # the whole slew + re-centre finishes before the mount's own limit trips.
     "auto_flip": False,
-    "flip_lead_min": 3.0,
+    # The flip can only happen AFTER the meridian: while the target is still
+    # east of it, a GOTO's natural destination is the side the mount is
+    # already on, so there is nothing to flip to. The usable window runs from
+    # the crossing to the mount's own tripod limit (~16-18 min on an AM5N).
+    "flip_after_min": 2.0,          # start this long past the meridian
+    "flip_before_limit_min": 12.0,  # give up beyond this — limit territory
     "flip_slew_s": 90.0,
     "centre_tol_arcsec": 90.0,
     "centre_max_iter": 6,
@@ -836,9 +841,11 @@ class LunarTransitEngine:
             return
 
         # --- automatic flip, ahead of the mount's own limit ----------------
+        past_min = -to_mer          # minutes SINCE the meridian crossing
         if (cfg.get("auto_flip") and moon_above_min and not self._flip_done
                 and not self._flip_running
-                and 0.0 < to_mer <= float(cfg.get("flip_lead_min", 3.0))):
+                and float(cfg.get("flip_after_min", 2.0)) <= past_min
+                <= float(cfg.get("flip_before_limit_min", 12.0))):
             if not cfg.get("capture_enabled") or not cfg.get("capture_host"):
                 self.log_event("flip", "auto_flip is on but no capture_host — "
                                        "cannot reach the mount", ok=False)

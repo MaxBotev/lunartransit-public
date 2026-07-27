@@ -174,7 +174,7 @@ machine. You can also change the site live from the dashboard (📍 SITE control
 | `manual_capture_max_s` | `300` | Safety auto-stop for a manual recording. |
 | `meridian_warn_min` | `20` | Warn this many minutes before the Moon reaches the meridian (0 disables). |
 | `auto_flip` | `false` | Perform the meridian flip automatically. **Commands real mount motion.** |
-| `flip_lead_min` | `3` | Start the flip this many minutes before the crossing. |
+| `flip_after_min` / `flip_before_limit_min` | `2` / `12` | Flip window, in minutes **past** the meridian. |
 | `flip_slew_s` | `90` | Expected slew time — the Moon's lead is computed from it. |
 | `centre_tol_arcsec` / `centre_max_iter` | `90` / `6` | Closed-loop centring tolerance and iteration cap. |
 | `min_illum_for_centring` | `0.35` | Below this the lit centroid isn't a reliable disc centre; the flip is skipped. |
@@ -277,6 +277,19 @@ blind GOTO back to the same coordinates does *not* land on the same spot. Plate
 solving cannot help either, since a lunar exposure shows no stars. Using the
 Moon as its own reference sidesteps all of it, and the same routine gives you a
 reliable "centre the Moon" at any time.
+
+The flip runs **after** the crossing, not before: while the target is still
+east of the meridian a GOTO's natural destination is the side the mount is
+already on, so there is nothing to flip to. The usable window is from the
+crossing to the mount's own limit — measured at ~16–18 min on an AM5N, hence a
+2–12 min default.
+
+Pier side is verified two ways. If the driver implements
+`DestinationSideOfPier`, that is used. Many do not (the ASI AM5N throws
+`not implemented`, and reports `CanSetPierSide=False`), so it falls back to
+geometry: a German equatorial sits **west** of the pier while the target is
+east of the meridian, and **east** of it afterwards. The post-flip check that
+`SideOfPier` actually changed always applies — that property *is* implemented.
 
 Two calibrations happen automatically: **plate scale** comes from the Moon's
 known angular diameter versus its measured pixel diameter (no focal length or
