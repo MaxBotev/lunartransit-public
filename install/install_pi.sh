@@ -6,7 +6,7 @@
 # Pi 4B (Bookworm/Debian 12). Works with any RTL2832U dongle (RTL-SDR v3/v4,
 # FlightStick, ...).
 #
-#   git clone https://github.com/<you>/lunartransit-public
+#   git clone https://github.com/MaxBotev/lunartransit-public
 #   cd lunartransit-public/install && sudo -v && ./install_pi.sh
 set -euo pipefail
 

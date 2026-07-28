@@ -125,7 +125,7 @@ Tools, no Xcode project. See [`ser-convert/README.md`](ser-convert/README.md).
 Tested on a Pi 4B running Raspberry Pi OS / Debian 12 (Bookworm).
 
 ```bash
-git clone https://github.com/<your-username>/lunartransit-public.git
+git clone https://github.com/MaxBotev/lunartransit-public.git
 cd lunartransit-public/install
 sudo -v
 ./install_pi.sh
@@ -160,7 +160,7 @@ Open the dashboard from any device on your network.
 Tested on Windows 11. Run from an **elevated** PowerShell inside the cloned repo:
 
 ```powershell
-git clone https://github.com/<your-username>/lunartransit-public.git
+git clone https://github.com/MaxBotev/lunartransit-public.git
 cd lunartransit-public
 Set-ExecutionPolicy -Scope Process Bypass
 .\install\install_windows.ps1
