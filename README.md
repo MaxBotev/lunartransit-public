@@ -10,6 +10,22 @@ your exact location. It ships a live web dashboard, an optional Telegram alert,
 and an optional TCP trigger that starts a high-frame-rate recording in
 [SharpCap](https://www.sharpcap.co.uk/) so you never miss the frame.
 
+![A Boeing airliner silhouetted against the full Moon, rotated so the aircraft
+flies horizontally. Landing gear, engine nacelles, wing flaps and the red and
+green navigation lights are all visible against the lunar
+surface.](docs/img/transit-f0941.jpg)
+
+<p align="center"><em>A real capture: aircraft over the Moon, predicted by this
+software and pulled from the raw video automatically.</em></p>
+
+![Animated slow-motion clip of an airliner crossing the full Moon from left to
+right.](docs/img/swa3886.gif)
+
+<p align="center"><em>The same thing in motion — a 0.5 s crossing, slowed down.
+(<a href="docs/img/swa3886.mov">4K original</a>)</em></p>
+
+---
+
 ![The 3D sky view: live aircraft with climb/descent trails over shaded terrain,
 and the Moon's true az/el direction drawn as a sight-tube from the observing
 site — anything crossing that line is a transit candidate.](docs/img/adsb3d-sightline.png)
@@ -62,6 +78,36 @@ You need **an ADS-B source**. Either:
 Both are covered below.
 
 ---
+
+## SER Convert — the macOS companion app
+
+Planetary cameras record **SER**, an uncompressed astronomy video format. This
+repo includes a small native macOS app for working with those captures:
+[`ser-convert/`](ser-convert/).
+
+![The Transit tab: a SER file loaded, detected crossings listed with frame
+ranges and scores, and a preview of the aircraft silhouette rotated 83 degrees
+so it flies horizontally.](docs/img/serconvert-transit-tab.png)
+
+**It finds the transit for you.** A silhouetted aircraft is far darker than even
+the darkest maria, so the app scans for near-black pixels *inside* the lunar
+disc. On a real capture the count went from a baseline of ~40 to **28155** at
+mid-transit — a 700× signal. Scanning a 15 GB, 1905-frame file takes about
+**8 seconds**, and the matching frames are exported as lossless PNGs straight
+from the SER. A rotation slider straightens the crossing first, since transits
+often run vertically down the frame.
+
+![The Convert tab: a SER file converting to ProRes with a progress bar showing
+frame 147 of 1905.](docs/img/serconvert-convert-tab.png)
+
+It also batch-converts SER to ProRes or lossless FFV1 — reading the **true frame
+rate** from the SER timestamp trailer. SER has no frame-rate field, so tools
+default to 25 fps and captures play at the wrong speed; the file above was
+actually 45.685 fps. Bayer captures are demosaiced automatically, and ffmpeg is
+installed for you if it's missing.
+
+Build it with `cd ser-convert && ./build.sh` — needs only the Xcode Command Line
+Tools, no Xcode project. See [`ser-convert/README.md`](ser-convert/README.md).
 
 ## Requirements
 
