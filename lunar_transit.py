@@ -59,6 +59,45 @@ PATH_ZONE_DEG = 3.0     # include sky-path polyline for aircraft this close
 MAX_FEED_AGE_S = 15.0   # refuse to predict on an ADS-B feed staler than this
 MAX_REPORT_LAG_S = 15.0 # drop individual contacts whose fix is older than this
 
+
+# --- host resolution ------------------------------------------------------
+# mDNS (.local) resolution fails intermittently even when the host is up and
+# reachable -- observed as "[Errno -2] Name or service not known" seconds
+# either side of successful calls. That is survivable for a sync, but the same
+# path fires REC during a transit that lasts half a second, so a transient
+# lookup failure would silently cost a capture. Remember the last address that
+# worked for a name and fall back to it when the lookup fails.
+_HOST_CACHE = {}
+
+
+def resolve_host(host, log=None):
+    """Resolve `host`, falling back to the last address that worked for it."""
+    try:
+        ip = socket.gethostbyname(host)
+        _HOST_CACHE[host] = ip
+        return ip
+    except OSError as e:
+        ip = _HOST_CACHE.get(host)
+        if ip is None:
+            raise
+        if log:
+            log("net", "%s did not resolve (%s) — using last known %s"
+                       % (host, e, ip), ok=False)
+        return ip
+
+
+def connect_host(host, port, timeout, log=None):
+    """create_connection, but immune to a transient name-lookup failure."""
+    try:
+        return socket.create_connection((host, int(port)), timeout=timeout)
+    except OSError as e:
+        # only worth retrying when the failure was the lookup itself
+        if not isinstance(e, socket.gaierror):
+            raise
+        ip = resolve_host(host, log)
+        return socket.create_connection((ip, int(port)), timeout=timeout)
+
+
 def load_horizon(path):
     """NINA custom-horizon file: 'azimuth altitude' pairs, # comments."""
     pts = []
@@ -300,7 +339,7 @@ class CaptureTrigger:
 
     def _send(self, host, port, msg):
         try:
-            with socket.create_connection((host, int(port)), timeout=5) as s:
+            with connect_host(host, port, 5) as s:
                 s.sendall((msg + "\n").encode())
                 s.settimeout(3)
                 try:

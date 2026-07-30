@@ -58,7 +58,12 @@ class FlipError(Exception):
 
 def _talk(host, port, cmd, timeout=200.0):
     """One command, one reply, on the same line protocol the capture uses."""
-    with socket.create_connection((host, int(port)), timeout=20.0) as s:
+    try:
+        from lunar_transit import connect_host
+        conn = connect_host(host, port, 20.0)
+    except ImportError:
+        conn = socket.create_connection((host, int(port)), timeout=20.0)
+    with conn as s:
         s.sendall((cmd + "\n").encode())
         s.settimeout(timeout)
         buf = b""
