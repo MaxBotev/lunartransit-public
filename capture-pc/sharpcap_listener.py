@@ -297,16 +297,26 @@ def sync_to(arg):
             return "ERR mount is slewing — wait for it to settle"
         before_ra, before_dec = a.RightAscension, a.Declination
         a.SyncToCoordinates(ra, dec)
-        time.sleep(0.4)
-        after_ra, after_dec = a.RightAscension, a.Declination
+        # The driver refreshes its reported position on its own poll cycle, so
+        # reading straight back reports "nothing moved" even on a good sync.
+        # Wait until it actually reflects the new model, or give up saying so.
+        after_ra, after_dec = before_ra, before_dec
+        for _ in range(20):
+            time.sleep(0.25)
+            after_ra, after_dec = a.RightAscension, a.Declination
+            if abs(after_ra - ra) < 0.01 and abs(after_dec - dec) < 0.15:
+                break
         # how far the model just moved, on the sky
         cosd = math.cos(math.radians(max(-89.9, min(89.9, dec))))
         dra = (after_ra - before_ra) * 15.0 * cosd
         ddec = after_dec - before_dec
         moved = math.sqrt(dra * dra + ddec * ddec)
+        settled = (abs(after_ra - ra) < 0.01 and abs(after_dec - dec) < 0.15)
         return ("OK synced to ra=%.6f dec=%.6f | model shifted %.3f deg "
-                "(dRA %+.3f dDec %+.3f) | was ra=%.6f dec=%.6f" % (
-                    ra, dec, moved, dra, ddec, before_ra, before_dec))
+                "(dRA %+.3f dDec %+.3f) | was ra=%.6f dec=%.6f%s" % (
+                    ra, dec, moved, dra, ddec, before_ra, before_dec,
+                    "" if settled else " | WARN driver did not confirm the new "
+                                       "position within 5s"))
     except Exception as e:
         return "ERR " + str(e)
 

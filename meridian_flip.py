@@ -44,6 +44,11 @@ DEFAULTS = {
     "centre_max_iter": 6,
     "calib_step_arcsec": 300.0,     # probe size for the rotation calibration
     "min_illum_for_centring": 0.35, # below this the lit centroid is unreliable
+    # A sync corrects the pointing model for the pier side it was taken on, so
+    # it does NOT survive a flip: the polar-misalignment component reverses.
+    # Re-syncing once the Moon is centred on the NEW side corrects that side
+    # too, so both are good for the rest of the night.
+    "sync_after_flip": True,
 }
 
 
@@ -252,6 +257,19 @@ class Flipper:
             self.say("WARNING: could not set lunar rate (%s) — continuing" % e)
             self.cmd("TRACK ON")     # tracking itself is non-negotiable
         err = self.centre()
+
+        # The sync that fixed the old pier side does not carry over -- the
+        # polar-misalignment error reverses across the meridian. Now that the
+        # Moon is genuinely centred on the NEW side, sync again so this side is
+        # corrected too and later GOTOs here land straight away.
+        if self.cfg.get("sync_after_flip", True):
+            try:
+                ra_now, dec_now = self.moon_radec(time.time())
+                self.say(self.cmd("SYNC %.6f %.6f" % (ra_now, dec_now),
+                                  timeout=60.0)[3:].strip())
+            except FlipError as e:
+                self.say("WARNING: post-flip sync failed (%s) — pointing on "
+                         "this pier side stays uncorrected" % e)
 
         st = _kv(self.cmd("MOUNT"))
         pier_after = st.get("side") or st.get("pier")
