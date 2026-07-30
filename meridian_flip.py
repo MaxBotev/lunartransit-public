@@ -278,3 +278,48 @@ def start(cfg, engine, log, on_done=None):
     t = threading.Thread(target=_worker, name="meridian-flip", daemon=True)
     t.start()
     return t
+
+
+def sync_to_moon(cfg, engine, log, max_offset_arcmin=8.0):
+    """Correct the mount's pointing model using the Moon as the reference.
+
+    A sync is only meaningful if the scope really is on the target, so this
+    MEASURES that first: it locates the lunar disc in the camera and refuses
+    unless the disc centre is close to the frame centre. Syncing while the Moon
+    is off-frame would teach the mount a brand-new, larger error.
+
+    Returns a dict describing what happened.
+    """
+    host, port = cfg["capture_host"], cfg["capture_port"]
+
+    # 1. where the Moon actually is, right now
+    ra, dec = engine.moon_radec_at(time.time())
+
+    # 2. where the camera is actually looking
+    m = _disc(_talk(host, port, "MOONPOS", timeout=120.0))
+    cx, cy, diam_px, w, h = m
+    scale = engine.moon_angular_diameter_arcsec() / diam_px      # arcsec/px
+    dx = (cx - w / 2.0) * scale
+    dy = (cy - h / 2.0) * scale
+    off_arcmin = math.hypot(dx, dy) / 60.0
+    if off_arcmin > max_offset_arcmin:
+        raise FlipError(
+            "Moon is %.1f arcmin from frame centre (limit %.1f) — centre it "
+            "first, or the sync would just teach the mount a new error"
+            % (off_arcmin, max_offset_arcmin))
+
+    # 3. what the mount currently believes, so the fix can be reported
+    st = _kv(_talk(host, port, "MOUNT"))
+    was_ra, was_dec = float(st["ra"]), float(st["dec"])
+    cosd = math.cos(math.radians(dec))
+    err = math.hypot((was_ra - ra) * 15.0 * cosd, was_dec - dec)
+
+    reply = _talk(host, port, "SYNC %.6f %.6f" % (ra, dec), timeout=60.0)
+    log("sync", "mount synced on the Moon: model was off %.3f deg "
+                "(Moon %.1f arcmin from frame centre) — %s"
+                % (err, off_arcmin, reply[3:].strip()),
+        model_error_deg=round(err, 3), centre_offset_arcmin=round(off_arcmin, 2))
+    return {"ok": True, "model_error_deg": round(err, 3),
+            "centre_offset_arcmin": round(off_arcmin, 2),
+            "moon_ra_h": round(ra, 6), "moon_dec_deg": round(dec, 4),
+            "info": reply[3:].strip()}

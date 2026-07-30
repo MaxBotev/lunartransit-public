@@ -271,6 +271,46 @@ def set_tracking(arg):
         return "ERR " + str(e)
 
 
+def sync_to(arg):
+    """SYNC <ra_hours> <dec_deg> — tell the mount where it is actually pointing.
+
+    This rewrites the mount's pointing model, so it is only ever correct when
+    the scope really is on the given coordinates. The CALLER is responsible for
+    proving that (the Pi checks the Moon is centred in the camera first); this
+    end just refuses the obviously-wrong cases and reports the correction it
+    applied so the size of the fix is visible.
+    """
+    try:
+        ra_s, dec_s = arg.split()
+        ra, dec = float(ra_s), float(dec_s)
+    except Exception:
+        return "ERR usage: SYNC <ra_hours> <dec_deg>"
+    if not (0.0 <= ra < 24.0 and -90.0 <= dec <= 90.0):
+        return "ERR coordinates out of range"
+    try:
+        a = _mount()
+        if not a.CanSync:
+            return "ERR this mount reports CanSync = false"
+        if a.AtPark:
+            return "ERR mount is parked"
+        if a.Slewing:
+            return "ERR mount is slewing — wait for it to settle"
+        before_ra, before_dec = a.RightAscension, a.Declination
+        a.SyncToCoordinates(ra, dec)
+        time.sleep(0.4)
+        after_ra, after_dec = a.RightAscension, a.Declination
+        # how far the model just moved, on the sky
+        cosd = math.cos(math.radians(max(-89.9, min(89.9, dec))))
+        dra = (after_ra - before_ra) * 15.0 * cosd
+        ddec = after_dec - before_dec
+        moved = math.sqrt(dra * dra + ddec * ddec)
+        return ("OK synced to ra=%.6f dec=%.6f | model shifted %.3f deg "
+                "(dRA %+.3f dDec %+.3f) | was ra=%.6f dec=%.6f" % (
+                    ra, dec, moved, dra, ddec, before_ra, before_dec))
+    except Exception as e:
+        return "ERR " + str(e)
+
+
 def mount_caps():
     """CAPS — READ ONLY. Driver properties that affect flip correctness.
 
@@ -637,6 +677,8 @@ def handle(conn, addr):
             reply = pier_check(arg)
         elif cmd == "CAPS":
             reply = mount_caps()
+        elif cmd == "SYNC":
+            reply = sync_to(arg)
         elif cmd == "TEMP":
             reply = focuser_info()
         elif cmd == "FPOS":

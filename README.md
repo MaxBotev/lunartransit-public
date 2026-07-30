@@ -290,6 +290,26 @@ suffix, and a literal IP makes a reasonable last resort.
 
 Check resolution from either machine with `ping sky.local`.
 
+### Fixing a mount that misses the Moon
+
+A GoTo that lands degrees away usually is not a targeting bug. Measured on a
+ZWO AM5N: the requested coordinates were **0.111°** from the true Moon — correct
+— while the mount *reported* being **2.80°** away with the Moon plainly visible
+in both cameras. The clock was fine (29 s, verified against true sidereal time).
+The mount's coordinate frame was simply rotated ~2.7° from the sky, constant
+over 40 minutes of tracking, so it failed identically every night.
+
+The fix is a **pointing sync**, not a wider search field — a 2.8° error exceeds
+the half-field of a typical guide scope too, so more FOV does not help.
+
+Centre the Moon and press **🎯 SYNC MOUNT TO MOON** on `/lunar` (or
+`POST /api/lunar/sync-moon`). It measures where the lunar disc actually sits in
+the frame, **refuses if it is more than 8 arcmin off centre** — syncing
+off-target would replace one pointing error with a larger one — then syncs to
+the Moon's apparent position from the ephemeris and reports how far the model
+moved. After that a GoTo lands within the residual polar-misalignment error
+(~6 arcmin measured here), well inside a typical planetary-camera frame.
+
 ### Equatorial mounts: the meridian will bite you
 
 A German-equatorial mount stops tracking at its meridian limit and then

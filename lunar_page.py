@@ -43,6 +43,9 @@ LUNAR_HTML = r"""<!DOCTYPE html>
                 background:rgba(255,64,64,.12);animation:recpulse 1.4s infinite;}
   @keyframes recpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,64,64,.45);}
                       50%{box-shadow:0 0 0 6px rgba(255,64,64,0);}}
+  .btn.sync{width:100%;border-color:rgba(55,255,176,.5);color:var(--green);
+            letter-spacing:1px;}
+  .btn.sync:hover{background:rgba(55,255,176,.12);}
   .sp{flex:1}
   .wrap{display:grid;grid-template-columns:1fr 340px;gap:14px;padding:14px;}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:14px;}
@@ -72,6 +75,7 @@ LUNAR_HTML = r"""<!DOCTYPE html>
   .ev.transit .x{color:var(--red);} .ev.watch .x{color:var(--amber);}
   .ev.possible .x{color:#ff8c3c;}
   .ev.meridian .x{color:#ff8c3c;font-weight:700;}
+  .ev.sync .x{color:var(--green);font-weight:700;}
   .ev.capture .x{color:var(--green);} .ev.sim .x{color:var(--cyan);}
   .muted{color:var(--dim);}
   .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
@@ -142,6 +146,11 @@ LUNAR_HTML = r"""<!DOCTYPE html>
         <div class="row">
           <button class="btn" onclick="testCapture()">⚡ TEST LINK</button>
           <button class="btn" onclick="simulate()">🛰 SIMULATE TRANSIT</button>
+        </div>
+        <div class="row">
+          <button class="btn sync" id="syncBtn" onclick="syncMoon()"
+                  title="Centre the Moon first — this rewrites the mount's pointing model">
+            🎯 SYNC MOUNT TO MOON</button>
         </div>
         <div class="muted" id="capMsg" style="margin-top:8px"></div>
       </div>
@@ -352,6 +361,20 @@ async function toggleRec(){
     rb.textContent = recording ? '⏹ STOP RECORDING' : '⏺ START RECORDING';
     rb.classList.toggle('live', recording);
   }
+}
+async function syncMoon(){
+  const b = document.getElementById('syncBtn'), msg = document.getElementById('capMsg');
+  b.disabled = true; b.textContent = '🎯 checking…';
+  msg.textContent = 'measuring where the Moon sits in the frame…';
+  try {
+    const r = await (await fetch('/api/lunar/sync-moon', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({})})).json();
+    msg.textContent = r.ok
+      ? `✅ synced — model was off ${r.model_error_deg}°, Moon was ${r.centre_offset_arcmin}′ from centre`
+      : '❌ ' + r.info;
+  } catch(e){ msg.textContent = '❌ sync failed: ' + e; }
+  finally { b.disabled = false; b.textContent = '🎯 SYNC MOUNT TO MOON'; }
 }
 async function testCapture(){
   document.getElementById('capMsg').textContent = 'testing…';

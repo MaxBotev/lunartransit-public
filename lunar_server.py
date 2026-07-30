@@ -408,6 +408,28 @@ def create_app(state):
         return jsonify({"ok": ok, "info": str(info),
                         "recording": eng.capture.manual_rec})
 
+    @app.route("/api/lunar/sync-moon", methods=["POST"])
+    def api_sync_moon():
+        """Correct the mount's pointing model using the centred Moon.
+
+        Guarded: refuses unless the Moon is measurably near the frame centre,
+        because syncing off-target replaces one pointing error with a larger one.
+        """
+        eng = state.lunar
+        if not eng:
+            return jsonify({"ok": False, "info": "engine not running"})
+        c = eng.cfg()
+        if not c.get("capture_host"):
+            return jsonify({"ok": False, "info": "capture_host not configured"})
+        try:
+            import meridian_flip
+            tol = float((request.get_json(force=True, silent=True) or {})
+                        .get("max_offset_arcmin", 8.0))
+            return jsonify(meridian_flip.sync_to_moon(c, eng, eng.log_event, tol))
+        except Exception as e:
+            eng.log_event("sync", "sync refused: %s" % e, ok=False)
+            return jsonify({"ok": False, "info": str(e)})
+
     @app.route("/api/lunar/simulate", methods=["POST"])
     def api_simulate():
         eng = state.lunar
