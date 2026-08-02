@@ -20,6 +20,7 @@
 
 import math
 import socket
+import sys
 import threading
 import time
 import traceback
@@ -740,13 +741,65 @@ def handle(conn, addr):
 
 
 def serve():
+    """Bind the command port, replacing any listener a previous run left behind.
+
+    Re-running this script in the same SharpCap session used to leave TWO
+    listeners on port 5580. On Windows -- unlike Unix -- SO_REUSEADDR lets a
+    second socket bind a port that is already bound, and Windows then hands
+    connections to whichever it likes. That is not theoretical: a stray second
+    listener on this port once swallowed the Pi's commands and drove the real
+    camera into a 49-second recording nobody asked for.
+
+    So the previous run's socket is closed first, and SO_REUSEADDR is set ONLY
+    when there was a previous run to replace. That distinction is the whole
+    trick: taking the port back off ourselves is legitimate and needs the flag
+    (the old socket lingers briefly after close), while taking it off a stranger
+    is the bug, and without the flag that bind simply fails and says so.
+
+    The handle is stashed on `sys` rather than in a module global because
+    re-running the script re-executes this file from the top, which would reset
+    any global here before it could be read.
+    """
+    prev = getattr(sys, "_lunar_listener_srv", None)
+    if prev is not None:
+        try:
+            prev.close()          # makes the old accept() raise, ending its loop
+            print("[lunar] closed the previous listener on port %d" % PORT)
+        except Exception:
+            pass
+
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", PORT))
+    if prev is not None:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    bound, why = False, None
+    for _ in range(12):           # the old socket can linger a moment
+        try:
+            srv.bind(("0.0.0.0", PORT))
+            bound = True
+            break
+        except Exception as e:
+            why = e
+            if prev is None:
+                break             # a stranger holds it; waiting will not help
+            time.sleep(0.5)
+    if not bound:
+        # Loud failure beats a silent second listener stealing half the traffic.
+        print("[lunar] CANNOT BIND PORT %d: %s" % (PORT, why))
+        print("[lunar] something else is holding it — restart SharpCap")
+        return
+    sys._lunar_listener_srv = srv
     srv.listen(2)
     print("[lunar] capture listener on port %d" % PORT)
     while True:
-        conn, addr = srv.accept()
+        try:
+            conn, addr = srv.accept()
+        except Exception:
+            # Socket closed by a newer run of this script: retire quietly.
+            if getattr(sys, "_lunar_listener_srv", None) is not srv:
+                print("[lunar] listener replaced by a newer run — exiting")
+            else:
+                print("[lunar] listener socket closed — exiting")
+            return
         threading.Thread(target=handle, args=(conn, addr)).start()
 
 
