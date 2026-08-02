@@ -174,6 +174,28 @@ DEFAULTS = {
     "centre_max_iter": 6,
     "calib_step_arcsec": 300.0,
     "min_illum_for_centring": 0.35,
+    "sync_after_flip": True,
+    # --- unattended re-centring ----------------------------------------------
+    # An equatorial at lunar rate corrects RA only, so the Moon's declination
+    # motion (~15 arcsec/min) is never tracked and it walks out of frame.
+    "auto_recentre": False,
+    "recentre_interval_s": 300.0,
+    "recentre_tol_arcsec": 60.0,
+    "stop_tracking_below_min_elev": False,
+    # --- acquisition (spiral search) -----------------------------------------
+    # Before the first sync of the night a cold GOTO can miss by degrees, which
+    # is far outside the field. Search outward until the disc appears, centre,
+    # then sync -- after which no further searching is needed on that pier side.
+    "auto_acquire": False,          # off by default: it commands mount motion
+    "acquire_recheck_s": 1800.0,    # how often to re-verify the Moon is in frame
+    "search_step_deg": 0.6,         # keep below the SHORT axis of the field
+    "search_radius_deg": 3.0,
+    "search_max_s": 900.0,
+    "search_settle_s": 1.5,
+    "search_centre_on_find": True,
+    "search_sync_on_find": True,
+    "search_min_blob_frac": 0.02,
+    "search_max_aspect": 3.0,
     "uncertainty_alerts": True,
     "uncertainty_sigmas": 2.0,      # how many sigma counts as "can't rule out".
                                     # 1.0 is tight and still misses real ones;
@@ -453,6 +475,8 @@ class LunarTransitEngine:
         self._flip_done = False     # one auto-flip attempt per crossing
         self._flip_running = False
         self._keeper = None         # periodic re-centre / stand-down
+        self._acquiring = False     # a spiral search is running
+        self._acquire_checked = 0.0
         self.horizon = None         # local-horizon profile [(az, alt), ...]
         self._hrz_mtime = None
         self._eph = None
@@ -893,6 +917,53 @@ class LunarTransitEngine:
                 target=k.tick, args=(now, moon["el"], cfg["lunar_min_elev_deg"]),
                 name="moon-keeper", daemon=True).start()
 
+    def check_acquire(self, cfg, moon, above_min_elev, now):
+        """Once per night, make sure the Moon is actually in the frame.
+
+        A cold GOTO at the start of a session lands wherever the pointing model
+        says, which before the first sync has been out by degrees on this rig --
+        far outside a field under one degree tall. So: one confirming frame,
+        and only if the Moon is genuinely absent, run the spiral search. The
+        search ends in a sync, which is why this is needed at most once per
+        pier side per night.
+        """
+        if not cfg.get("auto_acquire"):
+            return
+        if not cfg.get("capture_enabled") or not cfg.get("capture_host"):
+            return
+        if not above_min_elev or self._acquiring:
+            return
+        if now - self._acquire_checked < float(cfg.get("acquire_recheck_s", 1800.0)):
+            return
+        self._acquire_checked = now
+        if self.capture.snapshot(now).get("recording"):
+            return                       # never move the mount mid-recording
+
+        def _worker():
+            try:
+                import moon_find
+                from meridian_flip import FlipError, _talk
+                try:
+                    _talk(cfg["capture_host"], cfg["capture_port"],
+                          "MOONPOS", timeout=120.0)
+                    return               # already in frame; nothing to do
+                except FlipError as e:
+                    if not moon_find._is_empty_field(str(e)):
+                        self.log_event("find", "acquisition check skipped: %s"
+                                       % e, ok=False)
+                        return
+                self.log_event("find", "Moon is not in the frame — starting "
+                                       "automatic acquisition")
+                moon_find.Finder(cfg, self, self.log_event).run()
+            except Exception as e:
+                self.log_event("find", "automatic acquisition failed: %s" % e,
+                               ok=False)
+            finally:
+                self._acquiring = False
+
+        self._acquiring = True
+        threading.Thread(target=_worker, name="moon-acquire", daemon=True).start()
+
     def check_meridian(self, cfg, moon, moon_above_min):
         """Heads-up before the Moon reaches the meridian.
 
@@ -968,6 +1039,7 @@ class LunarTransitEngine:
 
         self.check_meridian(cfg, moon, above_min_elev)
         self.check_keeper(cfg, moon, above_min_elev, now)
+        self.check_acquire(cfg, moon, above_min_elev, now)
 
         aircraft, adsb_age = self.read_aircraft()
         sim = self.sim_aircraft()

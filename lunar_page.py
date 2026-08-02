@@ -148,6 +148,9 @@ LUNAR_HTML = r"""<!DOCTYPE html>
           <button class="btn" onclick="simulate()">🛰 SIMULATE TRANSIT</button>
         </div>
         <div class="row">
+          <button class="btn" id="findBtn" onclick="findMoon()"
+                  title="Slews in a widening spiral until the disc appears, then centres and syncs">
+            🔭 FIND MOON</button>
           <button class="btn sync" id="syncBtn" onclick="syncMoon()"
                   title="Centre the Moon first — this rewrites the mount's pointing model">
             🎯 SYNC MOUNT TO MOON</button>
@@ -361,6 +364,22 @@ async function toggleRec(){
     rb.textContent = recording ? '⏹ STOP RECORDING' : '⏺ START RECORDING';
     rb.classList.toggle('live', recording);
   }
+}
+async function findMoon(){
+  const b = document.getElementById('findBtn'), msg = document.getElementById('capMsg');
+  if(!confirm('Search for the Moon?\n\nThe mount will slew in a widening spiral '
+              + 'until the disc appears — this can take several minutes and '
+              + 'moves the telescope. Nothing should be recording.')) return;
+  b.disabled = true; b.textContent = '🔭 searching…';
+  try {
+    const r = await (await fetch('/api/lunar/find-moon', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({})})).json();
+    msg.textContent = r.ok ? '🔭 ' + r.info : '❌ ' + r.info;
+  } catch(e){ msg.textContent = '❌ search failed to start: ' + e; }
+  // The search runs on the server; progress shows in the event log, so the
+  // button comes back straight away rather than pretending to track it.
+  finally { b.disabled = false; b.textContent = '🔭 FIND MOON'; }
 }
 async function syncMoon(){
   const b = document.getElementById('syncBtn'), msg = document.getElementById('capMsg');

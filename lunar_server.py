@@ -430,6 +430,42 @@ def create_app(state):
             eng.log_event("sync", "sync refused: %s" % e, ok=False)
             return jsonify({"ok": False, "info": str(e)})
 
+    @app.route("/api/lunar/find-moon", methods=["POST"])
+    def api_find_moon():
+        """Spiral-search for the Moon, then centre and sync.
+
+        Runs on a worker thread and returns immediately: a full search can take
+        several minutes, which is far longer than any sensible HTTP timeout.
+        Progress arrives in the event log.
+        """
+        eng = state.lunar
+        if not eng:
+            return jsonify({"ok": False, "info": "engine not running"})
+        c = eng.cfg()
+        if not c.get("capture_host"):
+            return jsonify({"ok": False, "info": "capture_host not configured"})
+        if eng._acquiring:
+            return jsonify({"ok": False, "info": "a search is already running"})
+        if eng.capture.snapshot(time.time()).get("recording"):
+            return jsonify({"ok": False, "info":
+                            "a recording is in progress — stop it first"})
+        try:
+            import moon_find
+        except Exception as e:
+            return jsonify({"ok": False, "info": str(e)})
+        body = request.get_json(force=True, silent=True) or {}
+        for k in ("search_step_deg", "search_radius_deg"):
+            if body.get(k):
+                c[k] = float(body[k])
+        eng._acquiring = True
+
+        def _done(_res):
+            eng._acquiring = False
+
+        moon_find.start(c, eng, eng.log_event, on_done=_done)
+        return jsonify({"ok": True, "info": "search started — watch the event log",
+                        "started": True})
+
     @app.route("/api/lunar/simulate", methods=["POST"])
     def api_simulate():
         eng = state.lunar
