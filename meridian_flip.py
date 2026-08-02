@@ -81,9 +81,25 @@ BIAS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "pointing_bias.json")
 
 
+MIN_BIAS_DEG = 0.5
+
+
 def save_bias(side, dra_deg, ddec_deg, log=None):
-    """Record how far the mount's model was off, on-sky degrees, for `side`."""
+    """Record how far the mount's model was off, on-sky degrees, for `side`.
+
+    A near-zero error is NOT recorded. What this file is for is the COLD error
+    a re-home restores; once a sync has corrected the model, the measured error
+    is ~0, and saving that would overwrite the very number the next search
+    needs. Observed live: a search run minutes after a good sync measured
+    0.07 deg and replaced a hard-won 2.70 deg hint with it.
+    """
     if not side or side == "?":
+        return
+    if math.hypot(dra_deg, ddec_deg) < MIN_BIAS_DEG:
+        if log:
+            log("find", "model is already corrected (%.2f deg) — keeping the "
+                        "existing pointing bias for the next re-home"
+                        % math.hypot(dra_deg, ddec_deg))
         return
     try:
         data = {}
@@ -432,6 +448,51 @@ def sync_to_moon(cfg, engine, log, max_offset_arcmin=8.0):
             "info": reply[3:].strip()}
 
 
+# --- "is the rig busy doing something more important?" ---------------------
+# Nudging the mount is always the lowest-priority job on this rig. A transit
+# lasts under a second and cannot be repeated; an autofocus run is minutes of
+# the operator's time. Both must win over re-centring.
+_FOCUS_SEEN = {}          # host -> (position, when that position was first seen)
+
+
+def rig_busy(host, port, settle_s=30.0, timeout=30.0):
+    """Reason the rig must not be moved right now, or None.
+
+    Autofocus is the awkward one: SharpCap steps the focuser and pauses to
+    evaluate each step, so IsMoving reads False in the gaps and a single poll
+    happily reports "idle" in the middle of a run. Requiring the position to
+    have been STABLE for a while catches the whole run rather than one step of
+    it. It also catches a manual focus tweak, which is just as disruptive.
+    """
+    try:
+        st = _kv(_talk(host, port, "CAPST", timeout=timeout))
+    except Exception as e:
+        return "cannot reach the capture PC (%s)" % e
+    if str(st.get("capturing", "")).lower() == "true":
+        return "SharpCap is capturing"
+    if str(st.get("moving", "")).lower() == "true":
+        return "the focuser is moving (autofocus?)"
+
+    pos = st.get("pos")
+    if pos in (None, "None", ""):
+        return None                      # no focuser: nothing more to check
+    now = time.time()
+    prev = _FOCUS_SEEN.get(host)
+    if prev is None:
+        # First sighting establishes a baseline. It is NOT evidence of motion:
+        # treating it as one blocked the first re-centre after every restart.
+        _FOCUS_SEEN[host] = (pos, None)
+        return None
+    last_pos, moved_at = prev
+    if last_pos != pos:
+        _FOCUS_SEEN[host] = (pos, now)
+        return "the focuser just moved (%s -> %s) — letting it settle" % (last_pos, pos)
+    if moved_at is not None and now - moved_at < settle_s:
+        return ("the focuser moved %.0fs ago — waiting %.0fs for the run to finish"
+                % (now - moved_at, settle_s))
+    return None
+
+
 class Keeper:
     """Keeps the Moon centred, and stands the rig down when it sets.
 
@@ -492,6 +553,11 @@ class Keeper:
         self.busy = True
         self.last = now
         try:
+            why = rig_busy(self.full["capture_host"], self.full["capture_port"],
+                           float(self.full.get("focus_settle_s", 30.0)))
+            if why:
+                self._say("re-centre skipped: %s" % why)
+                return
             m = self.f.measure()
             ex, ey = self.f.offset_arcsec(m)
             err = math.hypot(ex, ey)

@@ -36,7 +36,7 @@ import threading
 import time
 
 from meridian_flip import (FlipError, Flipper, _kv, _talk, load_bias,
-                           save_bias)
+                           rig_busy, save_bias)
 
 DEFAULTS = {
     "search_step_deg": 0.6,      # tile spacing; keep under the SHORT field axis
@@ -168,6 +168,11 @@ class Finder(Flipper):
             raise FlipError("the Moon is at %.1f deg elevation, below the %.0f "
                             "deg working limit — nothing up there to find"
                             % (el, floor))
+
+        why = rig_busy(self.host, self.port,
+                       float(self.cfg.get("focus_settle_s", 30.0)))
+        if why:
+            raise FlipError("not starting a search: %s" % why)
 
         st = _kv(self.cmd("MOUNT"))
         if str(st.get("parked", "")).lower() == "true":

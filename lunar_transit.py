@@ -202,6 +202,10 @@ DEFAULTS = {
     # then sync -- after which no further searching is needed on that pier side.
     "auto_acquire": False,          # off by default: it commands mount motion
     "acquire_recheck_s": 1800.0,    # how often to re-verify the Moon is in frame
+    # Anything that moves the mount yields to a transit capture and to an
+    # autofocus run. A transit lasts under a second and never repeats.
+    "adjust_guard_s": 120.0,        # hands off this long before a capture
+    "focus_settle_s": 30.0,         # focuser must be still this long first
     "search_step_deg": 0.6,         # keep below the SHORT axis of the field
     "search_radius_deg": 3.0,
     "search_max_s": 1500.0,
@@ -906,6 +910,24 @@ class LunarTransitEngine:
                              * math.cos(math.radians(float(el_all[i]))) / r_m)
         return math.sqrt(sig_t * sig_t + sig_p * sig_p + sig_h * sig_h)
 
+    def capture_pending(self, cfg, now):
+        """Is a transit capture running, armed, or about to start?
+
+        Re-centring used to stand aside only once REC had already been sent,
+        which left the whole armed window open: a target is armed as much as
+        90 s ahead, and a re-centre pass started in that gap can still be
+        slewing when the aircraft crosses. A transit lasts a fraction of a
+        second and does not come round again, so anything that moves the mount
+        yields to it -- from the moment a target is armed until the recording
+        has stopped.
+        """
+        cap = self.capture.snapshot(now)
+        if cap.get("recording") or cap.get("armed_for"):
+            return True
+        rec_in = cap.get("rec_in_s")
+        return (rec_in is not None
+                and rec_in < float(cfg.get("adjust_guard_s", 120.0)))
+
     def check_keeper(self, cfg, moon, above_min_elev, now):
         """Periodic re-centre while the Moon is up; stand down when it sets.
 
@@ -932,6 +954,8 @@ class LunarTransitEngine:
             k.stand_down(moon["el"], cfg["lunar_min_elev_deg"])
             return
         k.stood_down = False                      # Moon back up: re-arm
+        if self.capture_pending(cfg, now):
+            return
         cap = self.capture.snapshot(now)
         active = bool(cap.get("recording"))
         if k.should_run(now, moon["el"], cfg["lunar_min_elev_deg"], active):
