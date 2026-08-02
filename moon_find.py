@@ -236,7 +236,18 @@ class Finder(Flipper):
                         " — on the frame edge, pulling in" if hit["clipped"] else ""))
             best = (dx, dy, hit)
             if hit["clipped"]:
-                hit = self._pull_in() or hit
+                try:
+                    pulled = self._pull_in()
+                except FlipError as e:
+                    # Seeing a sliver of the disc is real information even when
+                    # we cannot act on it safely. Keep searching: a neighbouring
+                    # tile very likely shows it whole, and that measures cleanly.
+                    self.say("could not pull the disc in (%s) — carrying on "
+                             "with the spiral" % e)
+                    continue
+                if pulled is None:
+                    continue
+                hit = pulled
                 best = (dx, dy, hit)
             break
 
@@ -332,7 +343,7 @@ class Finder(Flipper):
             return None
         return sum(dxs) / len(dxs), sum(dys) / len(dys)
 
-    def _calibrate_clipped(self):
+    def _calibrate_clipped(self, diam_px=1.0):
         """Learn pixel <- (dRA, dDec) using only un-clipped bounding-box edges."""
         step = float(self.cfg["calib_step_arcsec"])
         base = self._edges()
@@ -359,6 +370,28 @@ class Finder(Flipper):
         (dx_ra, dy_ra), (dx_dec, dy_dec) = probes["ra"], probes["dec"]
         dx_ra, dy_ra = dx_ra / step, dy_ra / step
         dx_dec, dy_dec = dx_dec / step, dy_dec / step
+
+        # Cross-check each probe against a scale we already know independently:
+        # the disc's own angular size. A probe that had to run in reverse takes
+        # up backlash on the way, so it under-reports -- observed live at
+        # 01:25, where the RA probe implied 1.99 arcsec/px against a true 1.21,
+        # and the resulting matrix inflated a correction to 0.70 deg, nearly a
+        # whole frame, and threw the Moon out of the field. A bad matrix must
+        # never reach the mount.
+        try:
+            px_per_arcsec = 1.0 / (self.engine.moon_angular_diameter_arcsec()
+                                   / max(1.0, diam_px))
+        except Exception:
+            px_per_arcsec = None
+        if px_per_arcsec:
+            for name, vec in (("RA", (dx_ra, dy_ra)), ("Dec", (dx_dec, dy_dec))):
+                mag = math.hypot(*vec)
+                if not (0.65 * px_per_arcsec <= mag <= 1.35 * px_per_arcsec):
+                    raise FlipError(
+                        "%s probe disagrees with the disc's own scale "
+                        "(%.2f vs %.2f px/arcsec) — refusing to correct on it"
+                        % (name, mag, px_per_arcsec))
+
         det = dx_ra * dy_dec - dx_dec * dy_ra
         if abs(det) < 1e-9:
             raise FlipError("clipped-edge calibration degenerate (det=%.2e) — "
@@ -400,11 +433,27 @@ class Finder(Flipper):
                         "cy": 0.5 * (e["by0"] + e["by1"]),
                         "diam": max(e["bx1"] - e["bx0"], e["by1"] - e["by0"]),
                         "w": e["w"], "h": e["h"], "clipped": False, "off": 0.0}
+            diam = max(e["bx1"] - e["bx0"], e["by1"] - e["by0"])
             if self.rot is None:
-                self._calibrate_clipped()
+                self._calibrate_clipped(diam)
             cx, cy = self._reconstruct(e)
             dra, ddec = self.pixel_to_correction(cx - e["w"] / 2.0,
                                                  cy - e["h"] / 2.0)
+            # Hard ceiling regardless of what the maths says. A pull-in only
+            # ever has to move the disc from a frame edge to the middle, so
+            # anything approaching a whole frame is a bad matrix, not a big
+            # error -- and acting on it loses the Moon entirely.
+            try:
+                scale = self.engine.moon_angular_diameter_arcsec() / max(1.0, diam)
+                cap = 0.45 * min(e["w"], e["h"]) * scale
+            except Exception:
+                cap = None
+            mag = math.hypot(dra, ddec)
+            if cap and mag > cap:
+                raise FlipError(
+                    "pull-in of %.0f arcsec exceeds the %.0f arcsec ceiling "
+                    "(0.45 frames) — the calibration is wrong, not the error"
+                    % (mag, cap))
             self.say("disc is off the %s edge — pulling in (dRA=%.0f dDec=%.0f)"
                      % ("/".join(k for k in ("x0", "x1", "y0", "y1") if not f[k]),
                         dra, ddec))

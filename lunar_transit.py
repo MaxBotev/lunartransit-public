@@ -956,6 +956,12 @@ class LunarTransitEngine:
         k.stood_down = False                      # Moon back up: re-arm
         if self.capture_pending(cfg, now):
             return
+        if self._acquiring:
+            # A search is slewing the mount right now. Its whole geometry
+            # assumes it is the only thing moving, so a re-centre landing mid
+            # spiral would corrupt it -- and the keeper's own measurement is
+            # meaningless while the field is being swept anyway.
+            return
         cap = self.capture.snapshot(now)
         active = bool(cap.get("recording"))
         if k.should_run(now, moon["el"], cfg["lunar_min_elev_deg"], active):
