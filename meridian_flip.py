@@ -49,6 +49,16 @@ DEFAULTS = {
     # Re-syncing once the Moon is centred on the NEW side corrects that side
     # too, so both are good for the rest of the night.
     "sync_after_flip": True,
+    # --- unattended keeper -------------------------------------------------
+    # An equatorial tracking at lunar rate corrects RA only, so the Moon's
+    # declination motion (~15 arcsec/min) is never tracked and the target walks
+    # out of frame. Re-centring on a timer costs one frame every few minutes
+    # and is far cheaper than continuous feature tracking.
+    "auto_recentre": False,
+    "recentre_interval_s": 300.0,
+    "recentre_tol_arcsec": 60.0,
+    "stop_tracking_below_min_elev": False,   # mount's own altitude limit is
+                                             # the real safety; this is extra
 }
 
 
@@ -346,3 +356,93 @@ def sync_to_moon(cfg, engine, log, max_offset_arcmin=8.0):
             "centre_offset_arcmin": round(off_arcmin, 2),
             "moon_ra_h": round(ra, 6), "moon_dec_deg": round(dec, 4),
             "info": reply[3:].strip()}
+
+
+class Keeper:
+    """Keeps the Moon centred, and stands the rig down when it sets.
+
+    Deliberately periodic rather than continuous: the Moon drifts about
+    35 arcsec/min, so a check every few minutes holds it to a few percent of
+    the frame, for one captured frame per interval instead of every frame.
+
+    The altitude cut-off here is a convenience, NOT the safety mechanism. Set
+    the mount's own Altitude Limit as well -- that keeps working when the Pi,
+    the network, or SharpCap does not.
+    """
+
+    def __init__(self, cfg, engine, log):
+        self.cfg = dict(DEFAULTS)
+        for k in DEFAULTS:
+            if k in cfg:
+                self.cfg[k] = cfg[k]
+        self.full = cfg
+        self.engine = engine
+        self.log = log
+        self.f = Flipper(cfg, engine, log)   # carries the cached rotation
+        self.last = 0.0
+        self.stood_down = False
+        self.busy = False
+
+    def _say(self, text, **kw):
+        self.log("keeper", text, **kw)
+
+    def should_run(self, now, moon_el, min_elev, capture_active):
+        if not self.full.get("auto_recentre"):
+            return False
+        if self.busy or capture_active:      # never nudge mid-recording
+            return False
+        return now - self.last >= float(self.cfg["recentre_interval_s"])
+
+    def stand_down(self, moon_el, min_elev):
+        """Moon has set below the working elevation: stop cleanly."""
+        if self.stood_down:
+            return
+        self.stood_down = True
+        host, port = self.full["capture_host"], self.full["capture_port"]
+        try:
+            _talk(host, port, "STOP", timeout=30.0)
+        except Exception:
+            pass
+        note = ""
+        if self.full.get("stop_tracking_below_min_elev"):
+            try:
+                _talk(host, port, "TRACK OFF", timeout=30.0)
+                note = ", tracking stopped"
+            except Exception as e:
+                note = ", could NOT stop tracking (%s)" % e
+        self._say("Moon below %.0f deg (now %.1f) — capture stopped%s"
+                  % (min_elev, moon_el, note), ok=True)
+
+    def tick(self, now, moon_el, min_elev):
+        """One re-centre pass. Runs on its own thread; may take seconds."""
+        self.busy = True
+        self.last = now
+        try:
+            m = self.f.measure()
+            ex, ey = self.f.offset_arcsec(m)
+            err = math.hypot(ex, ey)
+            tol = float(self.cfg["recentre_tol_arcsec"])
+            if err <= tol:
+                self._say("check: %.0f arcsec off centre — inside %.0f, left alone"
+                          % (err, tol))
+                return
+            if self.f.rot is None:
+                self.f.calibrate()
+            dx = m[0] - m[3] / 2.0
+            dy = m[1] - m[4] / 2.0
+            dra, ddec = self.f.pixel_to_correction(dx, dy)
+            self.f.cmd("NUDGE %.1f %.1f" % (dra, ddec))
+            m2 = self.f.measure()
+            ex2, ey2 = self.f.offset_arcsec(m2)
+            self._say("re-centred: %.0f -> %.0f arcsec (drift %.1f arcsec/min)"
+                      % (err, math.hypot(ex2, ey2),
+                         err / max(1.0, self.cfg["recentre_interval_s"] / 60.0)),
+                      before_arcsec=round(err), after_arcsec=round(math.hypot(ex2, ey2)))
+        except Exception as e:
+            self._say("re-centre failed: %s" % e, ok=False)
+        finally:
+            self.busy = False
+
+
+def start_keeper(cfg, engine, log):
+    return Keeper(cfg, engine, log)

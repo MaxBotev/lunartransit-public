@@ -452,6 +452,7 @@ class LunarTransitEngine:
         self._mer_warned = False    # meridian heads-up already sent this pass
         self._flip_done = False     # one auto-flip attempt per crossing
         self._flip_running = False
+        self._keeper = None         # periodic re-centre / stand-down
         self.horizon = None         # local-horizon profile [(az, alt), ...]
         self._hrz_mtime = None
         self._eph = None
@@ -859,6 +860,39 @@ class LunarTransitEngine:
                              * math.cos(math.radians(float(el_all[i]))) / r_m)
         return math.sqrt(sig_t * sig_t + sig_p * sig_p + sig_h * sig_h)
 
+    def check_keeper(self, cfg, moon, above_min_elev, now):
+        """Periodic re-centre while the Moon is up; stand down when it sets.
+
+        The Moon drifts ~35 arcsec/min because an equatorial at lunar rate
+        tracks RA only -- its declination motion is never corrected. A check
+        every few minutes holds it to a few percent of the frame.
+
+        NOTE: this is convenience, not safety. The mount's own Altitude Limit
+        is what protects an unattended rig, because it keeps working when this
+        process, the network or SharpCap does not.
+        """
+        if not cfg.get("auto_recentre"):
+            return
+        if not cfg.get("capture_enabled") or not cfg.get("capture_host"):
+            return
+        try:
+            import meridian_flip
+        except Exception:
+            return
+        if self._keeper is None:
+            self._keeper = meridian_flip.start_keeper(cfg, self, self.log_event)
+        k = self._keeper
+        if not above_min_elev:
+            k.stand_down(moon["el"], cfg["lunar_min_elev_deg"])
+            return
+        k.stood_down = False                      # Moon back up: re-arm
+        cap = self.capture.snapshot(now)
+        active = bool(cap.get("recording"))
+        if k.should_run(now, moon["el"], cfg["lunar_min_elev_deg"], active):
+            threading.Thread(
+                target=k.tick, args=(now, moon["el"], cfg["lunar_min_elev_deg"]),
+                name="moon-keeper", daemon=True).start()
+
     def check_meridian(self, cfg, moon, moon_above_min):
         """Heads-up before the Moon reaches the meridian.
 
@@ -933,6 +967,7 @@ class LunarTransitEngine:
         moon_up = bool(above_min_elev and (clear_of_horizon or not horizon_gates))
 
         self.check_meridian(cfg, moon, above_min_elev)
+        self.check_keeper(cfg, moon, above_min_elev, now)
 
         aircraft, adsb_age = self.read_aircraft()
         sim = self.sim_aircraft()
