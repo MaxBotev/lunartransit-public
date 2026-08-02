@@ -190,7 +190,7 @@ DEFAULTS = {
     "acquire_recheck_s": 1800.0,    # how often to re-verify the Moon is in frame
     "search_step_deg": 0.6,         # keep below the SHORT axis of the field
     "search_radius_deg": 3.0,
-    "search_max_s": 900.0,
+    "search_max_s": 1500.0,
     "search_settle_s": 1.5,
     "search_centre_on_find": True,
     "search_sync_on_find": True,

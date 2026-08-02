@@ -40,7 +40,7 @@ from meridian_flip import FlipError, Flipper, _kv, _talk
 DEFAULTS = {
     "search_step_deg": 0.6,      # tile spacing; keep under the SHORT field axis
     "search_radius_deg": 3.0,    # how far out to give up
-    "search_max_s": 900.0,       # hard time budget for one search
+    "search_max_s": 1500.0,      # hard budget; must exceed step/radius x tile time
     "search_settle_s": 1.5,      # let the mount stop ringing before snapping
     "search_centre_on_find": True,
     "search_sync_on_find": True,  # the whole point: never search twice a night
