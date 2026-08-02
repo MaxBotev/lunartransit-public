@@ -35,7 +35,8 @@ import math
 import threading
 import time
 
-from meridian_flip import FlipError, Flipper, _kv, _talk
+from meridian_flip import (FlipError, Flipper, _kv, _talk, load_bias,
+                           save_bias)
 
 DEFAULTS = {
     "search_step_deg": 0.6,      # tile spacing; keep under the SHORT field axis
@@ -180,7 +181,10 @@ class Finder(Flipper):
                  "out to %.1f deg (pier %s)" % (len(tiles), step, radius, pier0))
 
         best = None
-        for dx, dy in tiles:
+        queue = list(tiles)
+        bias_done = False
+        while queue:
+            dx, dy = queue.pop(0)
             if time.time() > deadline:
                 raise FlipError("search gave up after %.0f min without finding "
                                 "the Moon — check the mount is unparked, the "
@@ -204,6 +208,19 @@ class Finder(Flipper):
                 raise FlipError("a search tile changed pier side (%s -> %s) — "
                                 "stopped; the Moon is at the meridian, run the "
                                 "flip instead" % (pier0, side))
+
+            # The pier side is only knowable once the mount has left home, so
+            # the remembered bias can only be applied from the second pointing
+            # on. It goes to the FRONT of the queue: if the mount's error has
+            # repeated -- and across two nights it repeated to 0.175 deg -- the
+            # Moon is there, and the other 80 tiles are never visited.
+            if not bias_done and pier0 != "?":
+                bias_done = True
+                b = load_bias(pier0)
+                if b:
+                    queue.insert(0, b)
+                    self.say("trying the remembered pointing bias for pier %s "
+                             "first: %+.2f, %+.2f deg" % (pier0, b[0], b[1]))
 
             hit = self._look()
             if hit is None:
@@ -250,9 +267,19 @@ class Finder(Flipper):
             # this pier side lands and no search is needed again tonight.
             try:
                 ra, dec = self.moon_radec(time.time())
+                # Read the model's belief BEFORE correcting it: the difference
+                # is the bias worth remembering for the next re-home.
+                st = _kv(self.cmd("MOUNT"))
                 self.say(self.cmd("SYNC %.6f %.6f" % (ra, dec),
                                   timeout=60.0)[3:].strip())
                 out["synced"] = True
+                try:
+                    cosd = math.cos(math.radians(dec))
+                    save_bias(st.get("side") or pier0,
+                              (float(st["ra"]) - ra) * 15.0 * cosd,
+                              float(st["dec"]) - dec, self.log)
+                except Exception:
+                    pass
             except FlipError as e:
                 self.say("WARNING: sync after acquisition failed (%s) — the "
                          "Moon is centred but the pointing model is not fixed,"

@@ -28,7 +28,9 @@ the ephemeris, so measuring the disc in pixels gives arcsec/pixel directly --
 no focal length or pixel size needed, and it stays correct if the ROI changes.
 """
 
+import json
 import math
+import os
 import socket
 import threading
 import time
@@ -64,6 +66,55 @@ DEFAULTS = {
 
 class FlipError(Exception):
     pass
+
+
+# --- remembered pointing bias ---------------------------------------------
+# The mount's model error is not random: measured on two different nights it
+# was 2.743 deg and 2.697 deg, and the two vectors differed by only 0.175 deg
+# -- a fifth of the camera's short axis. That is cone/home-offset error, and it
+# comes back the same after every re-home. Remembering it turns a fifty-tile
+# spiral search into a single pointing.
+#
+# Stored PER PIER SIDE: the polar-misalignment part of the error reverses
+# across the meridian, so a bias measured on one side is wrong on the other.
+BIAS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "pointing_bias.json")
+
+
+def save_bias(side, dra_deg, ddec_deg, log=None):
+    """Record how far the mount's model was off, on-sky degrees, for `side`."""
+    if not side or side == "?":
+        return
+    try:
+        data = {}
+        if os.path.exists(BIAS_PATH):
+            with open(BIAS_PATH) as f:
+                data = json.load(f)
+        data[side] = {"dra_deg": round(float(dra_deg), 4),
+                      "ddec_deg": round(float(ddec_deg), 4),
+                      "t": time.time()}
+        tmp = BIAS_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.rename(tmp, BIAS_PATH)          # never leave a half-written file
+        if log:
+            log("find", "remembered pointing bias for pier %s: %+.2f, %+.2f deg"
+                        % (side, dra_deg, ddec_deg))
+    except Exception:
+        pass                                # a lost hint must never break a run
+
+
+def load_bias(side, max_age_days=30.0):
+    """The remembered bias for `side`, or None. Stale entries are ignored:
+    re-balancing or re-seating the OTA changes the cone error."""
+    try:
+        with open(BIAS_PATH) as f:
+            d = json.load(f)[side]
+        if time.time() - float(d.get("t", 0)) > max_age_days * 86400.0:
+            return None
+        return float(d["dra_deg"]), float(d["ddec_deg"])
+    except Exception:
+        return None
 
 
 def _connect(host, port, tries=3):
@@ -364,9 +415,13 @@ def sync_to_moon(cfg, engine, log, max_offset_arcmin=8.0):
     st = _kv(_talk(host, port, "MOUNT"))
     was_ra, was_dec = float(st["ra"]), float(st["dec"])
     cosd = math.cos(math.radians(dec))
-    err = math.hypot((was_ra - ra) * 15.0 * cosd, was_dec - dec)
+    bias_ra, bias_dec = (was_ra - ra) * 15.0 * cosd, was_dec - dec
+    err = math.hypot(bias_ra, bias_dec)
 
     reply = _talk(host, port, "SYNC %.6f %.6f" % (ra, dec), timeout=60.0)
+    # Remember it: this same offset comes back after the next re-home, and it
+    # is what lets a search start where the Moon actually is.
+    save_bias(st.get("side") or "?", bias_ra, bias_dec, log)
     log("sync", "mount synced on the Moon: model was off %.3f deg "
                 "(Moon %.1f arcmin from frame centre) — %s"
                 % (err, off_arcmin, reply[3:].strip()),
