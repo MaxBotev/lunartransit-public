@@ -66,13 +66,32 @@ class FlipError(Exception):
     pass
 
 
+def _connect(host, port, tries=3):
+    """Open the command socket, riding out a transient name-lookup failure.
+
+    mDNS (.local) resolution fails intermittently on this LAN even when the
+    host is up: a single blip once ended a Moon search after five pointings.
+    A blip lasts well under a second, so a couple of retries costs nothing and
+    turns a fatal error into a hiccup.
+    """
+    last = None
+    for i in range(tries):
+        try:
+            try:
+                from lunar_transit import connect_host
+                return connect_host(host, port, 20.0)
+            except ImportError:
+                return socket.create_connection((host, int(port)), timeout=20.0)
+        except OSError as e:
+            last = e
+            if i < tries - 1:
+                time.sleep(0.8 * (i + 1))
+    raise last
+
+
 def _talk(host, port, cmd, timeout=200.0):
     """One command, one reply, on the same line protocol the capture uses."""
-    try:
-        from lunar_transit import connect_host
-        conn = connect_host(host, port, 20.0)
-    except ImportError:
-        conn = socket.create_connection((host, int(port)), timeout=20.0)
+    conn = _connect(host, port)
     with conn as s:
         s.sendall((cmd + "\n").encode())
         s.settimeout(timeout)

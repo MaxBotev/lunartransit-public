@@ -87,15 +87,29 @@ def resolve_host(host, log=None):
 
 
 def connect_host(host, port, timeout, log=None):
-    """create_connection, but immune to a transient name-lookup failure."""
+    """create_connection, but immune to a transient name-lookup failure.
+
+    The cache MUST be primed here, on the path that works. Filling it only in
+    resolve_host looked equivalent but was useless: resolve_host runs solely
+    after a connection has already failed, and by then gethostbyname is failing
+    too -- same resolver, same instant -- so it fell through to an empty cache
+    and re-raised. The fallback never once fired. It cost a predicted 0.119 deg
+    transit on 2026-08-01 when REC could not resolve the capture host, and
+    killed a Moon search five pointings in.
+    """
     try:
-        return socket.create_connection((host, int(port)), timeout=timeout)
+        conn = socket.create_connection((host, int(port)), timeout=timeout)
     except OSError as e:
         # only worth retrying when the failure was the lookup itself
         if not isinstance(e, socket.gaierror):
             raise
-        ip = resolve_host(host, log)
+        ip = resolve_host(host, log)      # logs the fallback itself
         return socket.create_connection((ip, int(port)), timeout=timeout)
+    try:
+        _HOST_CACHE[host] = conn.getpeername()[0]
+    except Exception:
+        pass                      # caching is a bonus; never break the caller
+    return conn
 
 
 def load_horizon(path):
@@ -664,8 +678,16 @@ class LunarTransitEngine:
         return 2.0 * float(r) * 3600.0
 
     def moon_illum_now(self):
-        snap = self.snapshot()
-        return float((snap.get("moon") or {}).get("illum") or 0.0)
+        """Illuminated fraction right now, straight from the ephemeris.
+
+        This used to read the cached snapshot, where a missing value collapsed
+        to 0.0 through `or 0.0` -- indistinguishable from a genuine new Moon,
+        and treated as one. On 2026-08-01 that aborted a meridian flip with
+        "Moon only 0% lit" while the Moon was in fact 92.5% lit. Absent data
+        must not impersonate a measurement: compute it, and let a real failure
+        raise the way moon_angular_diameter_arcsec already does.
+        """
+        return float(self.moon_illum(time.time())[1])
 
     def sun_azel(self, observer, unix_time):
         """Sun topocentric az/el (used for 3D moon-phase lighting)."""
