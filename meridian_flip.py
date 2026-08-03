@@ -574,6 +574,7 @@ class Keeper:
         self._gain_ok = True
         self._gain_pending = None   # peak before the last change, for verification
         self._gain_deaf = 0
+        self._pier = None           # last pier side the rotation was measured on
 
     def _say(self, text, **kw):
         self.log("keeper", text, **kw)
@@ -615,6 +616,20 @@ class Keeper:
             if why:
                 self._say("re-centre skipped: %s" % why)
                 return
+            # A flip rotates the camera 180 degrees relative to the sky, so a
+            # rotation matrix measured on one pier side is NEGATED on the other
+            # and every correction drives the target the wrong way. Live on
+            # 2026-08-03 that ran 115 -> 194 -> 341 -> 665 -> 1304 arcsec over
+            # three passes and threw the Moon out of the field for the night.
+            side = (_kv(self.f.cmd("MOUNT")).get("side") or "?")
+            if side != "?" and self._pier is not None and side != self._pier:
+                self.f.rot = None
+                self._say("pier side changed %s -> %s — discarding the centring "
+                          "calibration, it is mirrored on the other side"
+                          % (self._pier, side))
+            if side != "?":
+                self._pier = side
+
             m = self.f.measure()
             ex, ey = self.f.offset_arcsec(m)
             err = math.hypot(ex, ey)
@@ -640,11 +655,20 @@ class Keeper:
             self.f.cmd("NUDGE %.1f %.1f" % (dra, ddec))
             m2 = self.f.measure()
             ex2, ey2 = self.f.offset_arcsec(m2)
+            err2 = math.hypot(ex2, ey2)
+            if err2 > err * 1.2 + 5.0:
+                # Backstop for any cause of a bad matrix, not just a flip: a
+                # nudge that increases the error cannot be a tracking problem.
+                self.f.rot = None
+                self._say("re-centring made it WORSE (%.0f -> %.0f arcsec) — "
+                          "the calibration is wrong; discarded, will re-measure"
+                          % (err, err2), ok=False)
+                return
             rate = ("drift %.1f arcsec/min over %.1f min"
                     % (err / gap_min, gap_min)) if gap_min >= 0.5 else "first pass"
             self._say("re-centred: %.0f -> %.0f arcsec (%s)"
-                      % (err, math.hypot(ex2, ey2), rate),
-                      before_arcsec=round(err), after_arcsec=round(math.hypot(ex2, ey2)),
+                      % (err, err2, rate),
+                      before_arcsec=round(err), after_arcsec=round(err2),
                       gap_min=round(gap_min, 1))
         except Exception as e:
             self._on_miss(now, e)
@@ -680,9 +704,57 @@ class Keeper:
             return "the Moon is not in the frame (sky=%d peak=%d)" % (sky, peak)
         return None
 
+    def bright_sky_gain(self, exc):
+        """Pull the gain down when the SKY is what we can see, not the Moon.
+
+        The exposure loop only ran after a successful disc measurement, which
+        made it useless exactly when it was needed. On 2026-08-03 the Moon was
+        lost before dawn, so every frame from then on failed, so gain was never
+        touched -- and the sky climbed from 105 to 224 with the gain still set
+        for a dark sky. That then defeated the SEARCH too, because a disc needs
+        30 counts of contrast and at sky=224 peak=253 there were 29. Gain could
+        not come down because the Moon was lost, and the Moon could not be
+        found because the gain was up.
+
+        A bright frame is its own signal and needs no disc in it. So when a
+        miss is caused by brightness, drive the gain down on the sky level
+        alone.
+        """
+        if not (self.full.get("auto_gain") and self._gain_ok):
+            return
+        got = re.search(r"sky=(\d+) peak=(\d+)", str(exc))
+        if not got:
+            return
+        sky = float(got.group(1))
+        if sky <= float(self.full.get("gain_sky_ceiling", 60.0)):
+            return                      # dark frame: the Moon is elsewhere
+        name = self._gain_name()
+        if not name:
+            return
+        cur = self._read_ctrl(name)
+        if not cur or "Value" not in cur:
+            return
+        cur = float(cur["Value"])
+        step = max(1.0, (self._gain_hi - self._gain_lo)
+                   * float(self.full.get("gain_step_frac", 0.05)))
+        want = max(self._gain_lo, cur - step)
+        if want >= cur:
+            self._adjust_exposure(0.0, 1.0, 0.0, sky)   # gain floored: shorten
+            return
+        try:
+            reply = _talk(self.full["capture_host"], self.full["capture_port"],
+                          "CTRL %s %g" % (name, want), timeout=30.0)
+        except Exception as e:
+            self._say("could not reduce gain for the bright sky: %s" % e, ok=False)
+            return
+        self._say("sky level %d with no Moon visible — bringing the gain down "
+                  "so the disc can stand out again (%s)"
+                  % (sky, reply[3:].strip()), sky=int(sky))
+
     def _on_miss(self, now, exc):
         """One failed pass. Log the transition, not every repetition."""
         blind = self._why_blind(exc)
+        self.bright_sky_gain(exc)
         if blind is None:                      # a genuine fault, always report
             self._say("re-centre failed: %s" % exc, ok=False)
             return

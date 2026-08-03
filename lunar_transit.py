@@ -209,6 +209,7 @@ DEFAULTS = {
     # obstruction needs patience -- the mount is still tracking correctly
     # behind the tree -- so this is deliberately long.
     "lost_grace_s": 900.0,
+    "lost_retry_s": 600.0,          # min gap between recovery searches
     # --- end of session ------------------------------------------------------
     # Park and close the flat panel's cover once the Moon is down, before the
     # Sun gets high. Every step is verified and any failure aborts the rest:
@@ -233,6 +234,10 @@ DEFAULTS = {
     "gain_target_lo": 170.0,        # of 255 — below this, detail is being lost
     "gain_target_hi": 235.0,        # above this the limb starts clipping
     "gain_step_frac": 0.05,         # of the control's range, per pass
+    # Above this sky level, a frame with no visible disc means the sky is too
+    # bright rather than the Moon being elsewhere -- so pull gain down on the
+    # sky reading alone, without needing a disc to measure.
+    "gain_sky_ceiling": 60.0,
     # Exposure is the second stage, used only once gain has railed. Shortening
     # is free and sharpens the silhouette; LENGTHENING smears it, so it is
     # capped. At 1.21 arcsec/px a 250 kt aircraft at 3 km streaks 73 px at
@@ -532,6 +537,7 @@ class LunarTransitEngine:
         self._keeper = None         # periodic re-centre / stand-down
         self._acquiring = False     # a spiral search is running
         self._daybreak = None       # end-of-session park / cover / shutdown
+        self._last_lost_search = 0.0
         self._acquire_checked = 0.0
         self.horizon = None         # local-horizon profile [(az, alt), ...]
         self._hrz_mtime = None
@@ -1025,6 +1031,14 @@ class LunarTransitEngine:
         lost = k.lost_for(now)
         if (lost > float(cfg.get("lost_grace_s", 900.0)) and not k.obstructed()
                 and cfg.get("auto_acquire") and not self._acquiring):
+            # The keeper only clears "lost" on its next successful pass, which
+            # is minutes away, so this condition stays true for the whole gap.
+            # Without a cooldown it fired every tick: 3545 log lines in one
+            # morning, the same sentence sixty times a minute, which buries the
+            # events that matter and hammers the capture PC.
+            if now - self._last_lost_search < float(cfg.get("lost_retry_s", 600.0)):
+                return
+            self._last_lost_search = now
             self.log_event("find", "Moon has been missing for %.0f min — "
                                    "starting a search" % (lost / 60.0))
             self.check_acquire(cfg, moon, above_min_elev, now, force=True)
