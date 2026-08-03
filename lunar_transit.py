@@ -223,6 +223,7 @@ DEFAULTS = {
     "daybreak_shutdown_pi": False,
     "daybreak_windows_user": "",
     "daybreak_windows_host": "",
+    "cover_progid": "",             # e.g. ASCOM.DeepSkyDad.FP.CoverCalibrator1
     # --- exposure ------------------------------------------------------------
     # As dawn comes up the sky climbs into the Moon's own brightness. Every
     # keeper frame already reports sky and peak levels, so holding the disc in

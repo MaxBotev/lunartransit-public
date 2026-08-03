@@ -439,7 +439,7 @@ def _cover_open_driver():
 
 
 def cover(arg):
-    """COVER STATE|CLOSE|OPEN|LIST|PROBE [progid...]|PROGID <id>
+    """COVER STATE|CLOSE|OPEN|LIST|SETTINGS [filter]|PROBE [progid...]|PROGID <id>
 
     CLOSE and OPEN do not return until the cover has actually reached the
     state, or they say why not. "I sent the command" is not good enough when
@@ -454,6 +454,43 @@ def cover(arg):
             if not found:
                 return "ERR no ASCOM CoverCalibrator driver installed"
             return "OK " + " | ".join("%s (%s)" % (k, v) for k, v in found)
+        if what == "SETTINGS":
+            # Deep Sky Dad registers six numbered CoverCalibrator instances and
+            # only one of them is configured for the port the panel is on. Each
+            # instance's settings live in the ASCOM Profile, so read them and
+            # let the COM port say which is which. Read-only: this never opens
+            # the port, so it cannot fight the FP2's Control Panel app.
+            from System import Type, Activator
+            filt = (parts[1].lower() if len(parts) > 1 else "deepskydad")
+            t = Type.GetTypeFromProgID("ASCOM.Utilities.Profile")
+            if t is None:
+                return "ERR the ASCOM Profile COM object is not available"
+            p = Activator.CreateInstance(t)
+            try:
+                p.DeviceType = "CoverCalibrator"
+                out = []
+                for pid, _desc in _cover_drivers():
+                    if filt not in pid.lower():
+                        continue
+                    bits = []
+                    try:
+                        for kv in p.Values(pid):
+                            k = str(kv.Key)
+                            v = str(getattr(kv, "Value", "") or "")
+                            if k:
+                                bits.append("%s=%s" % (k, v))
+                    except Exception as e:
+                        bits.append("<%s>" % e)
+                    out.append("%s: %s" % (pid, ", ".join(bits) or "<no settings>"))
+                if not out:
+                    return "ERR no CoverCalibrator ProgID matches %r" % filt
+                return "OK " + " | ".join(out)
+            finally:
+                try:
+                    from System.Runtime.InteropServices import Marshal
+                    Marshal.ReleaseComObject(p)
+                except Exception:
+                    pass
         if what == "PROBE":
             # If enumeration is unavailable, ask Windows directly whether each
             # plausible ProgID is registered. GetTypeFromProgID only does a
@@ -487,8 +524,8 @@ def cover(arg):
             if what == "STATE":
                 return "OK state=%s(%d)" % (_COVER_STATES.get(state, "?"), state)
             if what not in ("CLOSE", "OPEN"):
-                return ("ERR usage: COVER STATE|CLOSE|OPEN|LIST|PROBE|"
-                        "PROGID <id>")
+                return ("ERR usage: COVER STATE|CLOSE|OPEN|LIST|SETTINGS|"
+                        "PROBE|PROGID <id>")
             want = 1 if what == "CLOSE" else 3
             if state == want:
                 return "OK already %s" % _COVER_STATES[want]

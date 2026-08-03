@@ -42,6 +42,10 @@ DEFAULTS = {
     "daybreak_shutdown_pi": False,
     "daybreak_windows_user": "",     # for the ssh shutdown; empty = skip
     "daybreak_windows_host": "",
+    # Deep Sky Dad registers six numbered CoverCalibrator instances, so the
+    # listener cannot autodetect. Held here rather than in the listener because
+    # the listener's global resets every time the script is re-run.
+    "cover_progid": "",
 }
 
 
@@ -107,6 +111,9 @@ class Daybreak:
         # 3. the cover. This is the step the whole sequence exists for.
         closed = not self.cfg.get("daybreak_close_cover", True)
         if not closed:
+            progid = self.cfg.get("cover_progid") or ""
+            if progid:
+                self.cmd("COVER PROGID %s" % progid, timeout=30.0)
             reply = self.cmd("COVER CLOSE", timeout=180.0)
             self.say(reply[3:].strip())
             # Trust nothing: ask again, from scratch.
