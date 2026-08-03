@@ -114,17 +114,35 @@ class Daybreak:
             progid = self.cfg.get("cover_progid") or ""
             if progid:
                 self.cmd("COVER PROGID %s" % progid, timeout=30.0)
-            reply = self.cmd("COVER CLOSE", timeout=180.0)
-            self.say(reply[3:].strip())
-            # Trust nothing: ask again, from scratch.
-            state = self.cmd("COVER STATE", timeout=60.0)
-            closed = "Closed" in state
+            # The command's return value is NOT the thing being decided on --
+            # the hardware state is. Observed live: a COVER CLOSE that really
+            # did close the cover returned "Access to the port COM3 is denied",
+            # because Windows had not finished releasing the handle from the
+            # previous call. Treating that reply as failure would abort a
+            # sequence that had actually succeeded.
+            try:
+                self.say(self.cmd("COVER CLOSE", timeout=180.0)[3:].strip())
+            except FlipError as e:
+                self.say("close reported '%s' — checking what the cover "
+                         "actually did before deciding" % e, ok=False)
+
+            state = "not read"
+            for i in range(6):
+                time.sleep(3.0 if i else 1.0)
+                try:
+                    state = self.cmd("COVER STATE", timeout=60.0)
+                except FlipError as e:
+                    state = "unreadable (%s)" % e
+                    continue
+                if "Closed" in state:
+                    closed = True
+                    break
             if not closed:
                 raise FlipError(
-                    "the cover did not close (%s). NOT shutting anything down: "
-                    "with the optics open and the Sun coming up, the machines "
-                    "staying on is the only way you can still fix this remotely"
-                    % state[3:].strip())
+                    "the cover is not closed after 6 checks (%s). NOT shutting "
+                    "anything down: with the optics open and the Sun coming up, "
+                    "the machines staying on is the only way you can still fix "
+                    "this remotely" % state.replace("OK ", ""))
             self.say("cover confirmed closed")
 
         # 4/5. power down, Windows first -- the Pi is the only thing that can
