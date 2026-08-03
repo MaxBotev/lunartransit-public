@@ -29,7 +29,7 @@ import traceback
 # running listener actually the file on disk?" is one round trip instead of a
 # guess -- a stale listener has silently wasted three debugging cycles here,
 # each time looking exactly like a code bug.
-LISTENER_VERSION = "2026-08-03a"
+LISTENER_VERSION = "2026-08-03b"
 
 PORT = 5580
 MAX_CAPTURE_S = 120     # safety: force-stop if STOP never arrives
@@ -479,14 +479,30 @@ def cover(arg):
                     if filt not in pid.lower():
                         continue
                     bits = []
-                    try:
-                        for kv in p.Values(pid):
-                            k = str(kv.Key)
-                            v = str(getattr(kv, "Value", "") or "")
+                    # Profile.Values(DriverID, SubKey) has an OPTIONAL second
+                    # parameter, and COM late binding does not supply optional
+                    # arguments for you -- omitting it fails with "Missing
+                    # parameter does not have a default value". Pass it
+                    # explicitly, and keep the one-argument form as a fallback
+                    # in case a Platform version really does accept it.
+                    vals = None
+                    for args in ((pid, ""), (pid,)):
+                        try:
+                            vals = p.Values(*args)
+                            break
+                        except Exception as e:
+                            err = e
+                    if vals is None:
+                        bits.append("<%s>" % err)
+                    else:
+                        for kv in vals:
+                            try:
+                                k = str(kv.Key)
+                                v = str(getattr(kv, "Value", "") or "")
+                            except Exception:
+                                continue
                             if k:
                                 bits.append("%s=%s" % (k, v))
-                    except Exception as e:
-                        bits.append("<%s>" % e)
                     out.append("%s: %s" % (pid, ", ".join(bits) or "<no settings>"))
                 if not out:
                     return "ERR no CoverCalibrator ProgID matches %r" % filt
