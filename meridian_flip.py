@@ -742,6 +742,24 @@ class Keeper:
             return 1e-6
         return None
 
+    @staticmethod
+    def _infer_exposure_unit(lo, hi):
+        """Seconds-per-unit deduced from the control's own range, for cameras
+        that report no unit at all -- SharpCap 4.2 does not.
+
+        This camera advertises 0.000018 .. 2000. A minimum below a millisecond
+        can only be seconds: read as milliseconds it would be 18 ns, as
+        microseconds 18 ps, and no sensor has either. Anything less clear-cut
+        returns None, and lengthening is then refused rather than guessed --
+        being wrong by 1000x here means a smeared aircraft.
+        """
+        try:
+            if lo and 0.0 < float(lo) < 1e-3:
+                return 1.0
+        except (TypeError, ValueError):
+            pass
+        return None
+
     def _adjust_exposure(self, peak, lo, hi, sky):
         """Second stage of the ladder, once gain has nothing left to give.
 
@@ -766,7 +784,8 @@ class Keeper:
             return
         emin = float(got.get("MinValue") or 0.0)
         emax = float(got.get("MaximumValue") or got.get("MaxValue") or 0.0)
-        mult = self._exposure_to_seconds(got.get("Unit"))
+        mult = (self._exposure_to_seconds(got.get("Unit"))
+                or self._infer_exposure_unit(emin, emax))
         # Exposure IS linear in brightness, so a proportional step converges
         # far faster here than the fixed fraction gain uses.
         step = abs(cur) * float(self.full.get("exposure_step_frac", 0.30))
