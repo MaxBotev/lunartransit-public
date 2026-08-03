@@ -69,6 +69,16 @@ class FlipError(Exception):
     pass
 
 
+def _looks_empty(exc):
+    """True when the complaint is 'I cannot see the disc' rather than a fault.
+
+    Kept here rather than in moon_find so the flip can use it without the two
+    modules importing each other at load time.
+    """
+    m = str(exc).lower()
+    return any(s in m for s in ("no disc", "lit samples", "no samples"))
+
+
 # --- remembered pointing bias ---------------------------------------------
 # The mount's model error is not random: measured on two different nights it
 # was 2.743 deg and 2.697 deg, and the two vectors differed by only 0.175 deg
@@ -212,6 +222,7 @@ class Flipper:
         for k in DEFAULTS:
             if k in cfg:
                 self.cfg[k] = cfg[k]
+        self.full = cfg               # unmerged config, for anything we hand off to
         self.host = cfg["capture_host"]
         self.port = cfg["capture_port"]
         self.engine = engine          # for Moon ephemeris
@@ -358,7 +369,32 @@ class Flipper:
         except FlipError as e:
             self.say("WARNING: could not set lunar rate (%s) — continuing" % e)
             self.cmd("TRACK ON")     # tracking itself is non-negotiable
-        err = self.centre()
+        # Centring assumes the disc is already somewhere in the frame. After a
+        # flip that assumption is weakest: the pointing error reverses sign
+        # across the meridian, so the miss on the new side can be degrees where
+        # the field is under one. On 2026-08-02 at 04:02 the flip itself worked
+        # perfectly -- pier side changed, lunar tracking restored -- and then
+        # centring failed on its very first frame because the Moon was nowhere
+        # in it. The rig then sat mispointed for two and a half hours and fired
+        # eight captures at empty sky, one of them a 0.000 deg transit.
+        #
+        # An empty frame here is not a failure, it is the expected case. Search
+        # for the Moon instead of giving up: the search ends in a sync, which
+        # corrects this pier side for the rest of the night.
+        try:
+            err = self.centre()
+        except FlipError as e:
+            if not _looks_empty(e):
+                raise
+            self.say("the Moon is not in the frame after the flip (expected — "
+                     "the pointing error reverses across the meridian); "
+                     "searching for it")
+            import moon_find                    # deferred: moon_find imports us
+            out = moon_find.Finder(self.full, self.engine, self.log).run()
+            self.say("flip recovered by search: %d pointings, centred to %s "
+                     "arcsec" % (out.get("tiles", 0), out.get("residual_arcsec")),
+                     recovered_by_search=True)
+            return True                         # the search already synced
 
         # The sync that fixed the old pier side does not carry over -- the
         # polar-misalignment error reverses across the meridian. Now that the
