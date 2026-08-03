@@ -30,6 +30,7 @@ no focal length or pixel size needed, and it stays correct if the ROI changes.
 
 import json
 import math
+import re
 import os
 import socket
 import threading
@@ -517,6 +518,13 @@ class Keeper:
         self.last = 0.0
         self.stood_down = False
         self.busy = False
+        # Framing state. Without this the keeper reported "no disc" every five
+        # minutes for four hours -- 56 identical lines -- while eight transit
+        # captures fired at an empty field, one of them a dead-centre 0.000 deg
+        # pass. Losing the Moon is an event, not a status line.
+        self.last_seen = 0.0        # when the disc was last actually measured
+        self.lost_since = None
+        self.lost_reason = None
 
     def _say(self, text, **kw):
         self.log("keeper", text, **kw)
@@ -562,6 +570,7 @@ class Keeper:
             ex, ey = self.f.offset_arcsec(m)
             err = math.hypot(ex, ey)
             tol = float(self.cfg["recentre_tol_arcsec"])
+            self._seen(now)
             if err <= tol:
                 self._say("check: %.0f arcsec off centre — inside %.0f, left alone"
                           % (err, tol))
@@ -579,9 +588,64 @@ class Keeper:
                          err / max(1.0, self.cfg["recentre_interval_s"] / 60.0)),
                       before_arcsec=round(err), after_arcsec=round(math.hypot(ex2, ey2)))
         except Exception as e:
-            self._say("re-centre failed: %s" % e, ok=False)
+            self._on_miss(now, e)
         finally:
             self.busy = False
+
+    # ---- framing state ---------------------------------------------------
+    def _seen(self, now):
+        """The disc was measured: clear any loss, announcing the recovery."""
+        if self.lost_since is not None:
+            self._say("Moon is back in the frame after %.0f min"
+                      % ((now - self.lost_since) / 60.0))
+        self.last_seen = now
+        self.lost_since = None
+        self.lost_reason = None
+
+    @staticmethod
+    def _why_blind(msg):
+        """Distinguish 'looking the wrong way' from 'cannot see anything'.
+
+        A bright sky and an empty field produce the same "no disc" text, but
+        they need opposite responses: a search fixes mispointing and is futile
+        against dawn or thick cloud, where the mount is very likely still
+        tracking the Moon correctly.
+        """
+        m = str(msg)
+        got = re.search(r"sky=(\d+) peak=(\d+)", m)
+        if got:
+            sky, peak = int(got.group(1)), int(got.group(2))
+            if sky > 25:
+                return ("the sky is too bright to see the disc (sky=%d peak=%d)"
+                        " — dawn or cloud, not pointing" % (sky, peak))
+            return "the Moon is not in the frame (sky=%d peak=%d)" % (sky, peak)
+        return None
+
+    def _on_miss(self, now, exc):
+        """One failed pass. Log the transition, not every repetition."""
+        blind = self._why_blind(exc)
+        if blind is None:                      # a genuine fault, always report
+            self._say("re-centre failed: %s" % exc, ok=False)
+            return
+        if self.lost_since is None:
+            self.lost_since = now
+            self.lost_reason = blind
+            seen = ("last seen %.0f min ago" % ((now - self.last_seen) / 60.0)
+                    if self.last_seen else "not seen since startup")
+            self._say("LOST THE MOON: %s (%s). Still tracking — if this is a "
+                      "tree or a roof it will come back on its own."
+                      % (blind, seen), ok=False)
+        elif blind != self.lost_reason:
+            self.lost_reason = blind           # e.g. dark field -> bright sky
+            self._say("still no Moon: %s" % blind, ok=False)
+
+    def lost_for(self, now):
+        """Seconds the Moon has been missing, or 0 if it is in the frame."""
+        return 0.0 if self.lost_since is None else now - self.lost_since
+
+    def obstructed(self):
+        """True when the miss looks like brightness rather than mispointing."""
+        return bool(self.lost_reason and "too bright" in self.lost_reason)
 
 
 def start_keeper(cfg, engine, log):

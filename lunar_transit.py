@@ -205,6 +205,10 @@ DEFAULTS = {
     # Anything that moves the mount yields to a transit capture and to an
     # autofocus run. A transit lasts under a second and never repeats.
     "adjust_guard_s": 120.0,        # hands off this long before a capture
+    # How long the Moon may be missing before a search is worth running. An
+    # obstruction needs patience -- the mount is still tracking correctly
+    # behind the tree -- so this is deliberately long.
+    "lost_grace_s": 900.0,
     "focus_settle_s": 30.0,         # focuser must be still this long first
     "search_step_deg": 0.6,         # keep below the SHORT axis of the field
     "search_radius_deg": 3.0,
@@ -964,12 +968,26 @@ class LunarTransitEngine:
             return
         cap = self.capture.snapshot(now)
         active = bool(cap.get("recording"))
+        # Lost the Moon for a while? An obstruction needs patience, not a
+        # search: the mount is still tracking correctly behind that tree, and
+        # at ~23 arcsec/min even twenty minutes of drift is 0.13 deg, well
+        # inside a 0.73 deg frame -- so it reappears on its own. Mispointing
+        # is the opposite, and only a search fixes it. Escalate only after the
+        # grace period, and never while the complaint is a bright sky.
+        lost = k.lost_for(now)
+        if (lost > float(cfg.get("lost_grace_s", 900.0)) and not k.obstructed()
+                and cfg.get("auto_acquire") and not self._acquiring):
+            self.log_event("find", "Moon has been missing for %.0f min — "
+                                   "starting a search" % (lost / 60.0))
+            self.check_acquire(cfg, moon, above_min_elev, now, force=True)
+            return
+
         if k.should_run(now, moon["el"], cfg["lunar_min_elev_deg"], active):
             threading.Thread(
                 target=k.tick, args=(now, moon["el"], cfg["lunar_min_elev_deg"]),
                 name="moon-keeper", daemon=True).start()
 
-    def check_acquire(self, cfg, moon, above_min_elev, now):
+    def check_acquire(self, cfg, moon, above_min_elev, now, force=False):
         """Once per night, make sure the Moon is actually in the frame.
 
         A cold GOTO at the start of a session lands wherever the pointing model
@@ -985,7 +1003,8 @@ class LunarTransitEngine:
             return
         if not above_min_elev or self._acquiring:
             return
-        if now - self._acquire_checked < float(cfg.get("acquire_recheck_s", 1800.0)):
+        if (not force and now - self._acquire_checked
+                < float(cfg.get("acquire_recheck_s", 1800.0))):
             return
         self._acquire_checked = now
         if self.capture.snapshot(now).get("recording"):
@@ -1240,6 +1259,19 @@ class LunarTransitEngine:
                 "sim_active": self.sim is not None,
             }
 
+    def framing_warning(self, now):
+        """A line to append to an alert when the Moon is not known to be in
+        the frame. Eight captures fired at an empty field on 2026-08-02,
+        including a dead-centre 0.000 deg pass, with nothing in the alert to
+        say so. The capture still goes ahead -- a stale flag must never cost a
+        real transit -- but the operator is told."""
+        k = self._keeper
+        if k is None or not k.lost_since:
+            return ""
+        return ("\n⚠️ <b>Moon was NOT in the camera frame</b> at the last check "
+                "(%.0f min ago) — this capture may be empty" 
+                % (k.lost_for(now) / 60.0))
+
     def alert_and_arm(self, cfg, results, transit_deg, now):
         for r in results:
             st = self.alerted.setdefault(r["hex"], {})
@@ -1261,7 +1293,8 @@ class LunarTransitEngine:
                         f"alt {r['alt_ft']:,} ft · {r['gs_kt']} kt · "
                         f"az {r['az']}° el {r['el']}°\n"
                         f"📹 capture {'armed' if cfg['capture_enabled'] else 'DISABLED'}"
-                        f"{' [SIM]' if r['sim'] else ''}")
+                        f"{' [SIM]' if r['sim'] else ''}"
+                        + self.framing_warning(now))
             elif r.get("possible"):
                 if cfg.get("capture_on_possible", True):
                     self.capture.arm(r["hex"], r["tca_unix"],
@@ -1283,7 +1316,8 @@ class LunarTransitEngine:
                         f"az {r['az']}° el {r['el']}°\n"
                         f"📹 capture "
                         f"{'armed' if (cfg['capture_enabled'] and cfg.get('capture_on_possible', True)) else 'DISABLED'}"
-                        f"{' [SIM]' if r['sim'] else ''}")
+                        f"{' [SIM]' if r['sim'] else ''}"
+                        + self.framing_warning(now))
             elif r["watch"] and "watch" not in st and "transit" not in st:
                 st["watch"] = now
                 self.log_event("watch",
