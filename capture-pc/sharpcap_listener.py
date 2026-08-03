@@ -25,6 +25,12 @@ import threading
 import time
 import traceback
 
+# Bumped whenever a command is added or changed. PING reports it, so "is the
+# running listener actually the file on disk?" is one round trip instead of a
+# guess -- a stale listener has silently wasted three debugging cycles here,
+# each time looking exactly like a code bug.
+LISTENER_VERSION = "2026-08-03a"
+
 PORT = 5580
 MAX_CAPTURE_S = 120     # safety: force-stop if STOP never arrives
 SLEW_TIMEOUT_S = 180    # abort a slew that never finishes
@@ -1159,7 +1165,13 @@ def handle(conn, addr):
         elif cmd == "STOP":
             reply = stop_capture()
         elif cmd == "PING":
-            reply = "PONG"
+            reply = "PONG v%s" % LISTENER_VERSION
+        elif cmd == "VERSION":
+            reply = "OK version=%s commands=%s" % (LISTENER_VERSION, ",".join(sorted([
+                "REC", "STOP", "PING", "VERSION", "INFO", "DIR", "TEMP", "FPOS",
+                "FMOVE", "CAPST", "SNAP", "MOUNT", "SLEW", "FLIP", "NUDGE",
+                "TRACK", "MOONPOS", "PIERCHK", "CAPS", "SYNC", "CTRLS", "CTRL",
+                "PARK", "ACTIONS", "COVER"])))
         elif cmd == "INFO":
             reply = cam_info()
         elif cmd == "DIR":
@@ -1291,7 +1303,7 @@ def serve():
         return
     sys._lunar_listener_srv = srv
     srv.listen(2)
-    print("[lunar] capture listener on port %d" % PORT)
+    print("[lunar] capture listener v%s on port %d" % (LISTENER_VERSION, PORT))
     while True:
         try:
             conn, addr = srv.accept()
