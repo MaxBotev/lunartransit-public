@@ -29,7 +29,7 @@ import traceback
 # running listener actually the file on disk?" is one round trip instead of a
 # guess -- a stale listener has silently wasted three debugging cycles here,
 # each time looking exactly like a code bug.
-LISTENER_VERSION = "2026-08-03c"
+LISTENER_VERSION = "2026-08-03d"
 
 PORT = 5580
 MAX_CAPTURE_S = 120     # safety: force-stop if STOP never arrives
@@ -336,6 +336,38 @@ def sync_to(arg):
 # only for the moment an action takes, and let go again, so the app stays
 # usable the rest of the time.
 COVER_PROGID = ""          # set via  COVER PROGID <id>  once, or leave to autodetect
+# Re-running this script resets every global, and it gets re-run often. With
+# twelve CoverCalibrator drivers registered on this machine, an empty ProgID
+# means autodetect refuses and every cover command fails until it is set again.
+# So remember it on disk, beside the snapshot file.
+COVER_PROGID_FILE = r"C:\LunarTransit\cover_progid.txt"
+
+
+def _cover_progid_remembered():
+    try:
+        f = open(COVER_PROGID_FILE)
+        try:
+            return f.read().strip()
+        finally:
+            f.close()
+    except Exception:
+        return ""
+
+
+def _cover_progid_remember(progid):
+    try:
+        import os
+        d = os.path.dirname(COVER_PROGID_FILE)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        f = open(COVER_PROGID_FILE, "w")
+        try:
+            f.write(progid)
+        finally:
+            f.close()
+        return True
+    except Exception:
+        return False
 _COVER_STATES = {0: "NotPresent", 1: "Closed", 2: "Moving", 3: "Open",
                  4: "Unknown", 5: "Error"}
 
@@ -426,7 +458,7 @@ def _cover_open_driver():
     failure completely and works whatever the ASCOM Platform version.
     """
     from System import Type, Activator
-    progid = COVER_PROGID
+    progid = COVER_PROGID or _cover_progid_remembered()
     if not progid:
         found = _cover_drivers()
         if not found:
@@ -561,9 +593,16 @@ def cover(arg):
             return "OK registered: " + ", ".join(hits)
         if what == "PROGID":
             if len(parts) < 2:
-                return "OK progid=%s" % (COVER_PROGID or "<autodetect>")
+                return "OK progid=%s%s" % (
+                    COVER_PROGID or _cover_progid_remembered() or "<autodetect>",
+                    "" if COVER_PROGID else " (remembered)")
             COVER_PROGID = parts[1]
-            return "OK progid set to %s" % COVER_PROGID
+            kept = _cover_progid_remember(COVER_PROGID)
+            return "OK progid set to %s%s" % (
+                COVER_PROGID,
+                " and remembered across reloads" if kept
+                else " (could not write %s — it will reset on reload)"
+                     % COVER_PROGID_FILE)
 
         c = _cover_open_driver()
         try:
