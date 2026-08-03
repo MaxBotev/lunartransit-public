@@ -29,7 +29,7 @@ import traceback
 # running listener actually the file on disk?" is one round trip instead of a
 # guess -- a stale listener has silently wasted three debugging cycles here,
 # each time looking exactly like a code bug.
-LISTENER_VERSION = "2026-08-03b"
+LISTENER_VERSION = "2026-08-03c"
 
 PORT = 5580
 MAX_CAPTURE_S = 120     # safety: force-stop if STOP never arrives
@@ -439,9 +439,34 @@ def _cover_open_driver():
     t = Type.GetTypeFromProgID(progid)
     if t is None:
         raise RuntimeError("ProgID %r is not registered on this machine" % progid)
-    c = Activator.CreateInstance(t)
-    c.Connected = True
-    return c
+
+    # A serial port does not become free the instant the previous holder lets
+    # go: Windows finishes closing the handle on its own schedule, so two cover
+    # commands issued back to back can collide with each other. Observed live --
+    # a COVER CLOSE that had already moved the cover reported "Access to the
+    # port COM3 is denied", and so did the COVER STATE right behind it, while
+    # the same call seconds later worked fine. daybreak issues exactly that
+    # pair, so this has to ride it out rather than fail the sequence.
+    last = None
+    for attempt in range(6):
+        c = Activator.CreateInstance(t)
+        try:
+            c.Connected = True
+            return c
+        except Exception as e:
+            last = e
+            try:
+                from System.Runtime.InteropServices import Marshal
+                Marshal.ReleaseComObject(c)
+            except Exception:
+                pass
+            if "denied" not in str(e).lower() and "access" not in str(e).lower():
+                raise RuntimeError("connect failed: %s" % e)
+            time.sleep(1.5)
+    raise RuntimeError(
+        "could not open the cover's port after 6 tries: %s. Something else is "
+        "holding it -- the FP2 Control Panel app must be DISCONNECTED (its "
+        "DISCONNECT button) for the ASCOM driver to use COM3" % last)
 
 
 def cover(arg):
@@ -584,8 +609,11 @@ def cover(arg):
                 Marshal.ReleaseComObject(c)
             except Exception:
                 pass
+            # Give Windows a moment to actually close the handle, so the next
+            # cover command does not race this one.
+            time.sleep(1.0)
     except Exception as e:
-        return "ERR " + str(e)
+        return "ERR %s: %s" % (what.lower(), e)
 
 
 def park_mount(arg):
