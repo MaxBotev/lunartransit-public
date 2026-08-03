@@ -725,6 +725,89 @@ class Keeper:
                 return got
         return None
 
+    @staticmethod
+    def _exposure_to_seconds(unit):
+        """Multiplier from the exposure control's own unit to seconds.
+
+        None when the unit is missing or unrecognised, which is treated as a
+        refusal to lengthen rather than a guess -- getting this wrong by 1000x
+        would turn a 5 ms cap into 5 s and smear every aircraft into a streak.
+        """
+        u = (unit or "").strip().lower().replace("µ", "u")
+        if u in ("s", "sec", "secs", "second", "seconds"):
+            return 1.0
+        if u in ("ms", "msec", "msecs", "millisecond", "milliseconds"):
+            return 1e-3
+        if u in ("us", "usec", "usecs", "microsecond", "microseconds"):
+            return 1e-6
+        return None
+
+    def _adjust_exposure(self, peak, lo, hi, sky):
+        """Second stage of the ladder, once gain has nothing left to give.
+
+        The two directions are NOT symmetric. Shortening exposure is free and
+        actually helps: an aircraft crosses the disc in well under a second, so
+        a shorter frame is a sharper silhouette. Lengthening it smears the
+        target -- on this rig, at 1.21 arcsec/px, a 250 kt aircraft at 3 km
+        already streaks 73 px at 10 ms against a 1570 px disc. So increases are
+        capped by a blur limit, and refused outright when the control's unit is
+        unknown; decreases are unconditional.
+        """
+        got = self._read_ctrl("exposure")
+        if not got or "Value" not in got:
+            self._say("gain is railed and this camera exposes no exposure "
+                      "control — set it by hand", ok=False)
+            return
+        try:
+            cur = float(got["Value"])
+        except ValueError:
+            self._say("exposure control reports an unparseable value (%r)"
+                      % got.get("Value"), ok=False)
+            return
+        emin = float(got.get("MinValue") or 0.0)
+        emax = float(got.get("MaximumValue") or got.get("MaxValue") or 0.0)
+        mult = self._exposure_to_seconds(got.get("Unit"))
+        # Exposure IS linear in brightness, so a proportional step converges
+        # far faster here than the fixed fraction gain uses.
+        step = abs(cur) * float(self.full.get("exposure_step_frac", 0.30))
+
+        if peak > hi:
+            want = max(emin, cur - step)
+            if want >= cur - 1e-12:
+                self._say("disc peak %d is above %d but exposure is already at "
+                          "its minimum (%g) — the rig is out of headroom"
+                          % (peak, hi, emin), ok=False)
+                return
+        else:
+            cap_s = float(self.full.get("exposure_max_s", 0.005))
+            if mult is None:
+                self._say("gain is railed and the exposure control reports no "
+                          "usable unit (%r) — refusing to lengthen it blind, "
+                          "because too long an exposure smears the aircraft "
+                          "into a streak" % got.get("Unit"), ok=False)
+                return
+            cap = cap_s / mult
+            want = min(cur + step, cap, emax if emax > 0 else cap)
+            if want <= cur + 1e-12:
+                self._say("disc peak %d is below %d, gain is at maximum and "
+                          "exposure is at the %.0f ms blur limit — too dark to "
+                          "fix automatically without smearing transits"
+                          % (peak, lo, cap_s * 1000.0), ok=False)
+                return
+        try:
+            reply = _talk(self.full["capture_host"], self.full["capture_port"],
+                          "CTRL %s %g" % (got["name"], want), timeout=30.0)
+        except Exception as e:
+            self._say("exposure change refused: %s" % e, ok=False)
+            return
+        if abs(want - cur) > 0.05 * max(abs(cur), 1e-9):
+            self._gain_pending = peak      # only a real change proves anything
+        span = ("%.1f ms" % (want * mult * 1000.0)) if mult else ("%g" % want)
+        self._say("sky %d, disc peak %d %s the %d-%d band, gain railed — "
+                  "exposure %s (%s)" % (sky, peak, "above" if peak > hi else
+                                        "below", lo, hi, span, reply[3:].strip()),
+                  sky=int(sky), peak=int(peak))
+
     def _gain_name(self):
         if self._gain_ctl is not None:
             return self._gain_ctl
@@ -809,9 +892,10 @@ class Keeper:
         want = cur - step if peak > hi else cur + step
         want = max(self._gain_lo, min(self._gain_hi, want))
         if abs(want - cur) < 1e-6:
-            self._say("disc peak %d is outside %d-%d but gain is already at "
-                      "its %s — adjust exposure time instead"
-                      % (peak, lo, hi, "minimum" if peak > hi else "maximum"))
+            self._say("gain is at its %s and the disc is still %s the band — "
+                      "trying exposure" % ("minimum" if peak > hi else "maximum",
+                                           "above" if peak > hi else "below"))
+            self._adjust_exposure(peak, lo, hi, sky)
             return
         try:
             reply = _talk(self.full["capture_host"], self.full["capture_port"],
@@ -819,7 +903,8 @@ class Keeper:
         except Exception as e:
             self._say("gain change refused: %s" % e, ok=False)
             return
-        self._gain_pending = peak
+        if abs(want - cur) > 0.05 * max(abs(cur), 1e-9):
+            self._gain_pending = peak      # a clipped, tiny step proves nothing
         self._say("sky %d, disc peak %d %s the %d-%d band — %s"
                   % (sky, peak, "above" if peak > hi else "below", lo, hi,
                      reply[3:].strip()), sky=int(sky), peak=int(peak))

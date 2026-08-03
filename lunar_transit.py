@@ -218,6 +218,12 @@ DEFAULTS = {
     "gain_target_lo": 170.0,        # of 255 — below this, detail is being lost
     "gain_target_hi": 235.0,        # above this the limb starts clipping
     "gain_step_frac": 0.05,         # of the control's range, per pass
+    # Exposure is the second stage, used only once gain has railed. Shortening
+    # is free and sharpens the silhouette; LENGTHENING smears it, so it is
+    # capped. At 1.21 arcsec/px a 250 kt aircraft at 3 km streaks 73 px at
+    # 10 ms against a 1570 px disc -- 5 ms keeps that under 40.
+    "exposure_max_s": 0.005,
+    "exposure_step_frac": 0.30,     # exposure IS linear in brightness
     "focus_settle_s": 30.0,         # focuser must be still this long first
     "search_step_deg": 0.6,         # keep below the SHORT axis of the field
     "search_radius_deg": 3.0,
