@@ -343,28 +343,73 @@ def _cover_drivers():
     and it fails with a bare HRESULT. The registry is where the Profile keeps
     this anyway, and Microsoft.Win32 is always available.
     """
-    from Microsoft.Win32 import Registry
-    out = []
-    for path in (r"SOFTWARE\ASCOM\CoverCalibrator Drivers",
-                 r"SOFTWARE\WOW6432Node\ASCOM\CoverCalibrator Drivers"):
-        key = Registry.LocalMachine.OpenSubKey(path)
-        if key is None:
-            continue
-        try:
-            for name in key.GetSubKeyNames():
-                sub = key.OpenSubKey(name)
-                desc = ""
+    errs = []
+
+    # 1. The ASCOM Profile is itself a COM server, so it can be driven with
+    #    the same late binding used for the driver -- no assembly reference,
+    #    no import, nothing that IronPython has to resolve by name.
+    try:
+        from System import Type, Activator
+        t = Type.GetTypeFromProgID("ASCOM.Utilities.Profile")
+        if t is not None:
+            p = Activator.CreateInstance(t)
+            try:
+                p.DeviceType = "CoverCalibrator"
+                out = []
+                for d in p.RegisteredDevices("CoverCalibrator"):
+                    out.append((str(d.Key), str(getattr(d, "Value", "") or "")))
+                if out:
+                    return out
+            finally:
                 try:
-                    if sub is not None:
-                        desc = str(sub.GetValue("") or "")
-                finally:
-                    if sub is not None:
-                        sub.Close()
-                if not any(name == k for k, _ in out):
-                    out.append((str(name), desc))
-        finally:
-            key.Close()
-    return out
+                    from System.Runtime.InteropServices import Marshal
+                    Marshal.ReleaseComObject(p)
+                except Exception:
+                    pass
+    except Exception as e:
+        errs.append("Profile COM: %s" % e)
+
+    # 2. Failing that, the registry -- but Microsoft.Win32.Registry lives in
+    #    its own assembly on modern .NET and is not imported by default.
+    try:
+        try:
+            from Microsoft.Win32 import Registry
+        except ImportError:
+            import clr
+            clr.AddReference("Microsoft.Win32.Registry")
+            from Microsoft.Win32 import Registry
+        out = []
+        for path in (r"SOFTWARE\ASCOM\CoverCalibrator Drivers",
+                     r"SOFTWARE\WOW6432Node\ASCOM\CoverCalibrator Drivers"):
+            key = Registry.LocalMachine.OpenSubKey(path)
+            if key is None:
+                continue
+            try:
+                for name in key.GetSubKeyNames():
+                    sub = key.OpenSubKey(name)
+                    desc = ""
+                    try:
+                        if sub is not None:
+                            desc = str(sub.GetValue("") or "")
+                    finally:
+                        if sub is not None:
+                            sub.Close()
+                    if not any(name == k for k, _ in out):
+                        out.append((str(name), desc))
+            finally:
+                key.Close()
+        if out:
+            return out
+    except Exception as e:
+        errs.append("registry: %s" % e)
+
+    if errs:
+        raise RuntimeError(
+            "could not enumerate CoverCalibrator drivers (%s). Set it by hand "
+            "with  COVER PROGID <id>  -- the ProgID is shown by ASCOM "
+            "Diagnostics, or in the FP2's ASCOM setup dialog"
+            % "; ".join(errs))
+    return []
 
 
 def _cover_open_driver():
@@ -394,7 +439,7 @@ def _cover_open_driver():
 
 
 def cover(arg):
-    """COVER STATE|CLOSE|OPEN|LIST|PROGID <id>
+    """COVER STATE|CLOSE|OPEN|LIST|PROBE [progid...]|PROGID <id>
 
     CLOSE and OPEN do not return until the cover has actually reached the
     state, or they say why not. "I sent the command" is not good enough when
@@ -409,6 +454,27 @@ def cover(arg):
             if not found:
                 return "ERR no ASCOM CoverCalibrator driver installed"
             return "OK " + " | ".join("%s (%s)" % (k, v) for k, v in found)
+        if what == "PROBE":
+            # If enumeration is unavailable, ask Windows directly whether each
+            # plausible ProgID is registered. GetTypeFromProgID only does a
+            # registry lookup -- it does not create or connect anything -- so
+            # this is free and cannot disturb the device.
+            from System import Type
+            cands = list(parts[1:]) or [
+                "ASCOM.DeepSkyDad.FP2.CoverCalibrator",
+                "ASCOM.DeepSkyDadFP2.CoverCalibrator",
+                "ASCOM.DeepSkyDad.FP.CoverCalibrator",
+                "ASCOM.DSD.FP2.CoverCalibrator",
+                "ASCOM.DeepSkyDadFlatPanel.CoverCalibrator",
+                "ASCOM.Simulator.CoverCalibrator",
+            ]
+            hits = [c for c in cands if Type.GetTypeFromProgID(c) is not None]
+            if not hits:
+                return ("ERR none of these are registered: %s — find the real "
+                        "ProgID in ASCOM Diagnostics (Choose Device > "
+                        "CoverCalibrator) and set it with COVER PROGID <id>"
+                        % ", ".join(cands))
+            return "OK registered: " + ", ".join(hits)
         if what == "PROGID":
             if len(parts) < 2:
                 return "OK progid=%s" % (COVER_PROGID or "<autodetect>")
@@ -421,7 +487,8 @@ def cover(arg):
             if what == "STATE":
                 return "OK state=%s(%d)" % (_COVER_STATES.get(state, "?"), state)
             if what not in ("CLOSE", "OPEN"):
-                return "ERR usage: COVER STATE|CLOSE|OPEN|LIST|PROGID <id>"
+                return ("ERR usage: COVER STATE|CLOSE|OPEN|LIST|PROBE|"
+                        "PROGID <id>")
             want = 1 if what == "CLOSE" else 3
             if state == want:
                 return "OK already %s" % _COVER_STATES[want]
