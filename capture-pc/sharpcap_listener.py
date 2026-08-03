@@ -335,27 +335,46 @@ _COVER_STATES = {0: "NotPresent", 1: "Closed", 2: "Moving", 3: "Open",
 
 
 def _cover_drivers():
-    """Installed ASCOM CoverCalibrator drivers as (progid, name) pairs."""
-    import clr
-    clr.AddReference("ASCOM.Utilities")
-    from ASCOM.Utilities import Profile
-    p = Profile()
-    try:
-        p.DeviceType = "CoverCalibrator"
-        return [(str(d.Key), str(d.Value)) for d in
-                p.RegisteredDevices("CoverCalibrator")]
-    finally:
+    """Installed ASCOM CoverCalibrator drivers as (progid, name) pairs.
+
+    Read straight from the ASCOM Profile's registry keys rather than through
+    ASCOM.Utilities: inside SharpCap's IronPython, clr.AddReference cannot
+    resolve the ASCOM assemblies by name (they are not on its probing path),
+    and it fails with a bare HRESULT. The registry is where the Profile keeps
+    this anyway, and Microsoft.Win32 is always available.
+    """
+    from Microsoft.Win32 import Registry
+    out = []
+    for path in (r"SOFTWARE\ASCOM\CoverCalibrator Drivers",
+                 r"SOFTWARE\WOW6432Node\ASCOM\CoverCalibrator Drivers"):
+        key = Registry.LocalMachine.OpenSubKey(path)
+        if key is None:
+            continue
         try:
-            p.Dispose()
-        except Exception:
-            pass
+            for name in key.GetSubKeyNames():
+                sub = key.OpenSubKey(name)
+                desc = ""
+                try:
+                    if sub is not None:
+                        desc = str(sub.GetValue("") or "")
+                finally:
+                    if sub is not None:
+                        sub.Close()
+                if not any(name == k for k, _ in out):
+                    out.append((str(name), desc))
+        finally:
+            key.Close()
+    return out
 
 
 def _cover_open_driver():
-    """Connect to the cover, preferring an explicit ProgID over a guess."""
-    import clr
-    clr.AddReference("ASCOM.DriverAccess")
-    from ASCOM.DriverAccess import CoverCalibrator
+    """Connect to the cover through plain COM late binding.
+
+    An ASCOM driver is a COM server, so it can be created from its ProgID with
+    no .NET assembly references at all -- which sidesteps the AddReference
+    failure completely and works whatever the ASCOM Platform version.
+    """
+    from System import Type, Activator
     progid = COVER_PROGID
     if not progid:
         found = _cover_drivers()
@@ -366,7 +385,10 @@ def _cover_open_driver():
                 "%d CoverCalibrator drivers installed (%s) — pick one with "
                 "COVER PROGID <id>" % (len(found), ", ".join(f[0] for f in found)))
         progid = found[0][0]
-    c = CoverCalibrator(progid)
+    t = Type.GetTypeFromProgID(progid)
+    if t is None:
+        raise RuntimeError("ProgID %r is not registered on this machine" % progid)
+    c = Activator.CreateInstance(t)
     c.Connected = True
     return c
 
@@ -425,9 +447,15 @@ def cover(arg):
             return "ERR cover did not reach %s within 90s (now %s)" % (
                 _COVER_STATES[want], _COVER_STATES.get(state, "?"))
         finally:
+            # Release COM3 so the FP2's own Control Panel can use it again.
+            # A COM object has no Dispose(); drop the RCW explicitly instead.
             try:
-                c.Connected = False       # release COM3 for the Control Panel
-                c.Dispose()
+                c.Connected = False
+            except Exception:
+                pass
+            try:
+                from System.Runtime.InteropServices import Marshal
+                Marshal.ReleaseComObject(c)
             except Exception:
                 pass
     except Exception as e:
