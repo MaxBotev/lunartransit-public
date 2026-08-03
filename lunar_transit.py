@@ -209,6 +209,15 @@ DEFAULTS = {
     # obstruction needs patience -- the mount is still tracking correctly
     # behind the tree -- so this is deliberately long.
     "lost_grace_s": 900.0,
+    # --- exposure ------------------------------------------------------------
+    # As dawn comes up the sky climbs into the Moon's own brightness. Every
+    # keeper frame already reports sky and peak levels, so holding the disc in
+    # a sensible band costs no extra frames. Off by default: it changes how
+    # your video looks, which is your call, not the software's.
+    "auto_gain": False,
+    "gain_target_lo": 170.0,        # of 255 — below this, detail is being lost
+    "gain_target_hi": 235.0,        # above this the limb starts clipping
+    "gain_step_frac": 0.05,         # of the control's range, per pass
     "focus_settle_s": 30.0,         # focuser must be still this long first
     "search_step_deg": 0.6,         # keep below the SHORT axis of the field
     "search_radius_deg": 3.0,

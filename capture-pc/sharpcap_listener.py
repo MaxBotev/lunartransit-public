@@ -622,6 +622,86 @@ def cam_info():
     return "OK " + ",".join(members) + cfg
 
 
+def _find_control(cam, want):
+    """Match a control by name, ignoring case and spaces."""
+    key = want.lower().replace(" ", "").replace("_", "")
+    for c in cam.Controls:
+        nm = getattr(c, "Name", None)
+        if nm and nm.lower().replace(" ", "").replace("_", "") == key:
+            return c
+    return None
+
+
+def cam_controls(arg):
+    """CTRLS [name] — READ ONLY. Report the camera's controls.
+
+    Names and ranges differ between cameras and between SharpCap versions, so
+    nothing on the Pi hard-codes them: it asks, matches on what comes back, and
+    works with whatever this camera actually exposes.
+    """
+    try:
+        cam = SharpCap.SelectedCamera  # noqa: F821
+        if cam is None:
+            return "ERR no camera"
+        out = []
+        for c in cam.Controls:
+            nm = getattr(c, "Name", "?")
+            if arg and arg.strip().lower() not in str(nm).lower():
+                continue
+            bits = ["name=%s" % nm]
+            for f in ("Value", "MinValue", "MaximumValue", "MaxValue",
+                      "StepSize", "Automatic", "IsAuto", "Unit"):
+                if hasattr(c, f):
+                    try:
+                        bits.append("%s=%s" % (f, getattr(c, f)))
+                    except Exception:
+                        pass
+            out.append(";".join(bits))
+        if not out:
+            return "ERR no matching control"
+        return "OK " + " | ".join(out)
+    except Exception as e:
+        return "ERR " + str(e)
+
+
+def cam_control_set(arg):
+    """CTRL <name> <value> — set one camera control.
+
+    Refused while a capture is running: a gain change mid-recording puts a
+    brightness step through the middle of a transit, and the transit is the
+    entire point of the recording.
+    """
+    try:
+        parts = arg.split()
+        if len(parts) < 2:
+            return "ERR usage: CTRL <name> <value>"
+        want, val = parts[0], float(parts[1])
+        cam = SharpCap.SelectedCamera  # noqa: F821
+        if cam is None:
+            return "ERR no camera"
+        if _capturing(cam):
+            return "ERR refusing: a capture is running"
+        c = _find_control(cam, want)
+        if c is None:
+            names = []
+            for k in cam.Controls:
+                names.append(str(getattr(k, "Name", "?")))
+            return "ERR no control named %r — have: %s" % (want, ", ".join(names))
+        lo = getattr(c, "MinValue", None)
+        hi = getattr(c, "MaximumValue", None)
+        if hi is None:
+            hi = getattr(c, "MaxValue", None)
+        if lo is not None and val < lo:
+            return "ERR %s below minimum (%s)" % (want, lo)
+        if hi is not None and val > hi:
+            return "ERR %s above maximum (%s)" % (want, hi)
+        before = c.Value
+        c.Value = val
+        return "OK %s %s -> %s" % (getattr(c, "Name", want), before, c.Value)
+    except Exception as e:
+        return "ERR " + str(e)
+
+
 def dir_of(path):
     """DIR <dotted.path> — introspect any SharpCap scripting object remotely,
     e.g. 'DIR Focusers.SelectedFocuser'. Rooted at the SharpCap object."""
@@ -708,6 +788,10 @@ def handle(conn, addr):
                     reply = "OK moving to %d" % tgt
                 except Exception as e:
                     reply = "ERR " + str(e)
+        elif cmd == "CTRLS":
+            reply = cam_controls(arg)
+        elif cmd == "CTRL":
+            reply = cam_control_set(arg)
         elif cmd == "CAPST":
             cam = SharpCap.SelectedCamera  # noqa: F821
             f = SharpCap.Focusers.SelectedFocuser  # noqa: F821

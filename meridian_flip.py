@@ -227,6 +227,7 @@ class Flipper:
         self.port = cfg["capture_port"]
         self.engine = engine          # for Moon ephemeris
         self.log = log                # log_event(kind, text, **extra)
+        self.last_reply = None        # raw MOONPOS text (carries sky/peak)
         self.scale = None             # arcsec per pixel
         self.rot = None               # (a, b, c, d): pixel delta -> (dRA, dDec)
 
@@ -242,8 +243,13 @@ class Flipper:
         return self.engine.moon_radec_at(when)
 
     def measure(self):
-        """Snap and locate the disc. Returns (cx, cy, diam_px, w, h)."""
-        return _disc(self.cmd("MOONPOS", timeout=120.0))
+        """Snap and locate the disc. Returns (cx, cy, diam_px, w, h).
+
+        The raw reply is kept: it also carries the frame's sky and peak levels,
+        which is free brightness telemetry for the exposure loop.
+        """
+        self.last_reply = self.cmd("MOONPOS", timeout=120.0)
+        return _disc(self.last_reply)
 
     def offset_arcsec(self, m):
         """Pixel offset of the disc from frame centre -> arcsec, using the
@@ -561,6 +567,13 @@ class Keeper:
         self.last_seen = 0.0        # when the disc was last actually measured
         self.lost_since = None
         self.lost_reason = None
+        # exposure loop state
+        self._gain_ctl = None
+        self._gain_lo = 0.0
+        self._gain_hi = 0.0
+        self._gain_ok = True
+        self._gain_pending = None   # peak before the last change, for verification
+        self._gain_deaf = 0
 
     def _say(self, text, **kw):
         self.log("keeper", text, **kw)
@@ -614,6 +627,7 @@ class Keeper:
             # means nothing.
             gap_min = ((now - self.last_seen) / 60.0) if self.last_seen else 0.0
             self._seen(now)
+            self.auto_gain(now)
             if err <= tol:
                 self._say("check: %.0f arcsec off centre — inside %.0f, left alone"
                           % (err, tol))
@@ -683,6 +697,132 @@ class Keeper:
         elif blind != self.lost_reason:
             self.lost_reason = blind           # e.g. dark field -> bright sky
             self._say("still no Moon: %s" % blind, ok=False)
+
+    # ---- exposure ---------------------------------------------------------
+    # As dawn comes up the sky level climbs into the Moon's own brightness and
+    # the disc stops standing out. Measured on 2026-08-02, five minutes apart:
+    # sky 3 -> 23 -> 56 in half an hour. Every keeper frame already reports sky
+    # and peak, so holding the disc at a sensible level costs no extra frames.
+    #
+    # The loop is closed and self-checking rather than calculated: gain is not
+    # linear in brightness on most cameras (often 0.1 dB steps), and the frame
+    # being measured is a PNG SharpCap wrote, which may carry a display stretch
+    # that hides the change entirely. So it takes one small step, then verifies
+    # on the next pass that the peak actually moved -- and switches itself off,
+    # loudly, if it did not.
+    def _read_ctrl(self, want):
+        """One camera control as a dict, or None. CTRLS returns blocks of
+        semicolon-separated key=value, pipe-separated between controls."""
+        try:
+            reply = _talk(self.full["capture_host"], self.full["capture_port"],
+                          "CTRLS " + want, timeout=30.0)
+        except Exception:
+            return None
+        for block in reply[3:].split("|"):
+            got = dict(p.split("=", 1) for p in block.strip().split(";")
+                       if "=" in p)
+            if want.lower() in got.get("name", "").lower():
+                return got
+        return None
+
+    def _gain_name(self):
+        if self._gain_ctl is not None:
+            return self._gain_ctl
+        try:
+            reply = _talk(self.full["capture_host"], self.full["capture_port"],
+                          "CTRLS gain", timeout=30.0)
+        except Exception as e:
+            self._say("cannot read the camera controls (%s) — exposure loop off"
+                      % e, ok=False)
+            self._gain_ok = False
+            return None
+        for block in reply[3:].split("|"):
+            got = dict(p.split("=", 1) for p in block.strip().split(";")
+                       if "=" in p)
+            if "gain" in got.get("name", "").lower():
+                self._gain_ctl = got["name"]
+                self._gain_lo = float(got.get("MinValue") or 0.0)
+                self._gain_hi = float(got.get("MaximumValue")
+                                      or got.get("MaxValue") or 0.0)
+                if self._gain_hi <= self._gain_lo:
+                    self._say("gain control '%s' reports no usable range "
+                              "(%s..%s) — exposure loop off"
+                              % (self._gain_ctl, self._gain_lo, self._gain_hi),
+                              ok=False)
+                    self._gain_ok = False
+                    return None
+                self._say("exposure loop will drive '%s' (%g..%g)"
+                          % (self._gain_ctl, self._gain_lo, self._gain_hi))
+                return self._gain_ctl
+        self._say("this camera exposes no gain control — exposure loop off",
+                  ok=False)
+        self._gain_ok = False
+        return None
+
+    @property
+    def last_reply(self):
+        return self.f.last_reply
+
+    def auto_gain(self, now):
+        """Nudge gain to hold the lunar disc in a sensible brightness band."""
+        if not (self.full.get("auto_gain") and self._gain_ok):
+            return
+        if not self.last_reply:
+            return
+        d = _kv(self.last_reply)
+        try:
+            peak, sky = float(d["peak"]), float(d["sky"])
+        except Exception:
+            return
+        lo = float(self.full.get("gain_target_lo", 170.0))
+        hi = float(self.full.get("gain_target_hi", 235.0))
+
+        # Did the LAST adjustment actually do anything?
+        if self._gain_pending is not None:
+            moved = peak - self._gain_pending
+            if abs(moved) < 2.0:
+                self._gain_deaf += 1
+                if self._gain_deaf >= 3:
+                    self._gain_ok = False
+                    self._say("exposure loop disabled: three gain changes moved "
+                              "the measured peak by less than 2 counts. The "
+                              "snapshot is probably display-stretched, so its "
+                              "levels do not track gain and cannot steer it.",
+                              ok=False)
+                    return
+            else:
+                self._gain_deaf = 0
+            self._gain_pending = None
+
+        if lo <= peak <= hi:
+            return
+        name = self._gain_name()
+        if not name:
+            return
+        span = max(1.0, self._gain_hi - self._gain_lo)
+        step = span * float(self.full.get("gain_step_frac", 0.05))
+        got = self._read_ctrl(name)
+        if got is None or "Value" not in got:
+            self._say("could not read the current gain", ok=False)
+            return
+        cur = float(got["Value"])
+        want = cur - step if peak > hi else cur + step
+        want = max(self._gain_lo, min(self._gain_hi, want))
+        if abs(want - cur) < 1e-6:
+            self._say("disc peak %d is outside %d-%d but gain is already at "
+                      "its %s — adjust exposure time instead"
+                      % (peak, lo, hi, "minimum" if peak > hi else "maximum"))
+            return
+        try:
+            reply = _talk(self.full["capture_host"], self.full["capture_port"],
+                          "CTRL %s %g" % (name, want), timeout=30.0)
+        except Exception as e:
+            self._say("gain change refused: %s" % e, ok=False)
+            return
+        self._gain_pending = peak
+        self._say("sky %d, disc peak %d %s the %d-%d band — %s"
+                  % (sky, peak, "above" if peak > hi else "below", lo, hi,
+                     reply[3:].strip()), sky=int(sky), peak=int(peak))
 
     def lost_for(self, now):
         """Seconds the Moon has been missing, or 0 if it is in the frame."""
