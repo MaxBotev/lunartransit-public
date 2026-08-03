@@ -622,12 +622,85 @@ def cam_info():
     return "OK " + ",".join(members) + cfg
 
 
+# Which member holds the CAMERA's settings differs by SharpCap version, and
+# the obvious guess is wrong: on 4.2 `SelectedCamera.Controls` is the WPF user
+# -interface control collection inherited from the view, whose items are
+# WPFPropertyControl and have no Value at all. So try the candidates in order
+# and accept the first one whose items actually look like camera settings.
+_CTRL_COLLECTIONS = ("Controls", "CameraControls", "Properties",
+                     "ControlValues", "Settings")
+_VALUE_MEMBERS = ("Value", "NumericValue", "ValueNumeric", "CurrentValue")
+
+
+def _ctrl_value(c):
+    """(member_name, value) for whichever member holds this control's value."""
+    for m in _VALUE_MEMBERS:
+        try:
+            v = getattr(c, m)
+        except Exception:
+            continue
+        if v is not None and not callable(v):
+            return m, v
+    return None, None
+
+
+def _camera_controls(cam):
+    """The camera's settings collection, or None if nothing looks right."""
+    for attr in _CTRL_COLLECTIONS:
+        try:
+            coll = getattr(cam, attr)
+            items = [c for c in coll]
+        except Exception:
+            continue
+        for c in items:
+            try:
+                if getattr(c, "Name", None) and _ctrl_value(c)[0]:
+                    return items
+            except Exception:
+                pass
+    return None
+
+
+def _describe_camera(cam):
+    """Fallback for CTRLS: what DOES this camera object offer? Reported so the
+    right accessor can be found from a real machine instead of guessed at."""
+    out = []
+    for attr in _CTRL_COLLECTIONS:
+        try:
+            coll = getattr(cam, attr)
+        except Exception as e:
+            out.append("%s: <%s>" % (attr, e))
+            continue
+        try:
+            items = [c for c in coll]
+            kinds = sorted(set(str(type(c)).split(".")[-1].strip("'>") for c in items))
+            sample = ""
+            if items:
+                c = items[0]
+                members = sorted(m for m in dir(c) if not m.startswith("_"))[:25]
+                sample = " first-item members: " + ",".join(members)
+            out.append("%s: %d items %s%s" % (attr, len(items), kinds, sample))
+        except Exception as e:
+            out.append("%s: not iterable (%s)" % (attr, e))
+    keys = ("control", "propert", "gain", "expos", "setting")
+    members = sorted(m for m in dir(cam)
+                     if any(k in m.lower() for k in keys))
+    out.append("camera members matching %s: %s" % (list(keys), ",".join(members)))
+    return " | ".join(out)
+
+
 def _find_control(cam, want):
-    """Match a control by name, ignoring case and spaces."""
+    """Match a control by name, ignoring case, spaces and underscores."""
     key = want.lower().replace(" ", "").replace("_", "")
-    for c in cam.Controls:
-        nm = getattr(c, "Name", None)
-        if nm and nm.lower().replace(" ", "").replace("_", "") == key:
+    items = _camera_controls(cam)
+    if not items:
+        return None
+    for c in items:
+        try:
+            nm = getattr(c, "Name", None)
+        except Exception:
+            continue
+        if nm and str(nm).lower().replace(" ", "").replace("_", "") == key:
             return c
     return None
 
@@ -643,19 +716,32 @@ def cam_controls(arg):
         cam = SharpCap.SelectedCamera  # noqa: F821
         if cam is None:
             return "ERR no camera"
+        items = _camera_controls(cam)
+        if items is None:
+            return "ERR no usable control collection — " + _describe_camera(cam)
         out = []
-        for c in cam.Controls:
-            nm = getattr(c, "Name", "?")
+        for c in items:
+            try:
+                nm = getattr(c, "Name", "?")
+            except Exception:
+                continue
             if arg and arg.strip().lower() not in str(nm).lower():
                 continue
             bits = ["name=%s" % nm]
-            for f in ("Value", "MinValue", "MaximumValue", "MaxValue",
-                      "StepSize", "Automatic", "IsAuto", "Unit"):
-                if hasattr(c, f):
-                    try:
-                        bits.append("%s=%s" % (f, getattr(c, f)))
-                    except Exception:
-                        pass
+            vm, val = _ctrl_value(c)
+            if vm:
+                bits.append("Value=%s" % val)
+                if vm != "Value":
+                    bits.append("ValueMember=%s" % vm)
+            for f in ("MinValue", "Minimum", "MaximumValue", "MaxValue", "Maximum",
+                      "StepSize", "Increment", "Automatic", "IsAuto", "Unit",
+                      "Unity", "ValueUnit"):
+                try:
+                    v = getattr(c, f)
+                except Exception:
+                    continue
+                if v is not None and not callable(v):
+                    bits.append("%s=%s" % (f, v))
             out.append(";".join(bits))
         if not out:
             return "ERR no matching control"
@@ -683,21 +769,34 @@ def cam_control_set(arg):
             return "ERR refusing: a capture is running"
         c = _find_control(cam, want)
         if c is None:
+            items = _camera_controls(cam)
+            if items is None:
+                return "ERR no usable control collection on this camera"
             names = []
-            for k in cam.Controls:
-                names.append(str(getattr(k, "Name", "?")))
+            for k in items:
+                try:
+                    names.append(str(getattr(k, "Name", "?")))
+                except Exception:
+                    pass
             return "ERR no control named %r — have: %s" % (want, ", ".join(names))
-        lo = getattr(c, "MinValue", None)
-        hi = getattr(c, "MaximumValue", None)
-        if hi is None:
-            hi = getattr(c, "MaxValue", None)
-        if lo is not None and val < lo:
-            return "ERR %s below minimum (%s)" % (want, lo)
-        if hi is not None and val > hi:
-            return "ERR %s above maximum (%s)" % (want, hi)
-        before = c.Value
-        c.Value = val
-        return "OK %s %s -> %s" % (getattr(c, "Name", want), before, c.Value)
+        vm, before = _ctrl_value(c)
+        if not vm:
+            return "ERR control %r exposes no writable value" % want
+        for lo_name in ("MinValue", "Minimum"):
+            lo = getattr(c, lo_name, None)
+            if lo is not None and not callable(lo):
+                if val < lo:
+                    return "ERR %s below minimum (%s)" % (want, lo)
+                break
+        for hi_name in ("MaximumValue", "MaxValue", "Maximum"):
+            hi = getattr(c, hi_name, None)
+            if hi is not None and not callable(hi):
+                if val > hi:
+                    return "ERR %s above maximum (%s)" % (want, hi)
+                break
+        setattr(c, vm, val)
+        return "OK %s %s -> %s" % (getattr(c, "Name", want), before,
+                                   _ctrl_value(c)[1])
     except Exception as e:
         return "ERR " + str(e)
 
