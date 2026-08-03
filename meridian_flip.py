@@ -570,6 +570,13 @@ class Keeper:
             ex, ey = self.f.offset_arcsec(m)
             err = math.hypot(ex, ey)
             tol = float(self.cfg["recentre_tol_arcsec"])
+            # Drift is error divided by the time it took to accumulate, which
+            # is NOT the configured interval: passes get skipped for captures,
+            # autofocus and searches, so the real gap is often longer. Using
+            # the nominal 5 min reported "104.5 arcsec/min" for an 18-minute
+            # gap whose true rate was 29 -- a number that looks alarming and
+            # means nothing.
+            gap_min = ((now - self.last_seen) / 60.0) if self.last_seen else 0.0
             self._seen(now)
             if err <= tol:
                 self._say("check: %.0f arcsec off centre — inside %.0f, left alone"
@@ -583,10 +590,12 @@ class Keeper:
             self.f.cmd("NUDGE %.1f %.1f" % (dra, ddec))
             m2 = self.f.measure()
             ex2, ey2 = self.f.offset_arcsec(m2)
-            self._say("re-centred: %.0f -> %.0f arcsec (drift %.1f arcsec/min)"
-                      % (err, math.hypot(ex2, ey2),
-                         err / max(1.0, self.cfg["recentre_interval_s"] / 60.0)),
-                      before_arcsec=round(err), after_arcsec=round(math.hypot(ex2, ey2)))
+            rate = ("drift %.1f arcsec/min over %.1f min"
+                    % (err / gap_min, gap_min)) if gap_min >= 0.5 else "first pass"
+            self._say("re-centred: %.0f -> %.0f arcsec (%s)"
+                      % (err, math.hypot(ex2, ey2), rate),
+                      before_arcsec=round(err), after_arcsec=round(math.hypot(ex2, ey2)),
+                      gap_min=round(gap_min, 1))
         except Exception as e:
             self._on_miss(now, e)
         finally:
