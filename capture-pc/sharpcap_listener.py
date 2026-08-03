@@ -322,6 +322,187 @@ def sync_to(arg):
         return "ERR " + str(e)
 
 
+# --- flat-panel cover (ASCOM CoverCalibrator) ------------------------------
+# The Deep Sky Dad FP2 is a serial device on a COM port, and a COM port has
+# exactly one owner. Its own Control Panel app holds COM3 while it is
+# connected, so this driver cannot open the port at the same time -- the app
+# must be disconnected (its DISCONNECT button) or closed. We therefore connect
+# only for the moment an action takes, and let go again, so the app stays
+# usable the rest of the time.
+COVER_PROGID = ""          # set via  COVER PROGID <id>  once, or leave to autodetect
+_COVER_STATES = {0: "NotPresent", 1: "Closed", 2: "Moving", 3: "Open",
+                 4: "Unknown", 5: "Error"}
+
+
+def _cover_drivers():
+    """Installed ASCOM CoverCalibrator drivers as (progid, name) pairs."""
+    import clr
+    clr.AddReference("ASCOM.Utilities")
+    from ASCOM.Utilities import Profile
+    p = Profile()
+    try:
+        p.DeviceType = "CoverCalibrator"
+        return [(str(d.Key), str(d.Value)) for d in
+                p.RegisteredDevices("CoverCalibrator")]
+    finally:
+        try:
+            p.Dispose()
+        except Exception:
+            pass
+
+
+def _cover_open_driver():
+    """Connect to the cover, preferring an explicit ProgID over a guess."""
+    import clr
+    clr.AddReference("ASCOM.DriverAccess")
+    from ASCOM.DriverAccess import CoverCalibrator
+    progid = COVER_PROGID
+    if not progid:
+        found = _cover_drivers()
+        if not found:
+            raise RuntimeError("no ASCOM CoverCalibrator driver is installed")
+        if len(found) > 1:
+            raise RuntimeError(
+                "%d CoverCalibrator drivers installed (%s) — pick one with "
+                "COVER PROGID <id>" % (len(found), ", ".join(f[0] for f in found)))
+        progid = found[0][0]
+    c = CoverCalibrator(progid)
+    c.Connected = True
+    return c
+
+
+def cover(arg):
+    """COVER STATE|CLOSE|OPEN|LIST|PROGID <id>
+
+    CLOSE and OPEN do not return until the cover has actually reached the
+    state, or they say why not. "I sent the command" is not good enough when
+    the thing being protected from is the Sun.
+    """
+    global COVER_PROGID
+    parts = (arg or "").split()
+    what = (parts[0].upper() if parts else "STATE")
+    try:
+        if what == "LIST":
+            found = _cover_drivers()
+            if not found:
+                return "ERR no ASCOM CoverCalibrator driver installed"
+            return "OK " + " | ".join("%s (%s)" % (k, v) for k, v in found)
+        if what == "PROGID":
+            if len(parts) < 2:
+                return "OK progid=%s" % (COVER_PROGID or "<autodetect>")
+            COVER_PROGID = parts[1]
+            return "OK progid set to %s" % COVER_PROGID
+
+        c = _cover_open_driver()
+        try:
+            state = int(c.CoverState)
+            if what == "STATE":
+                return "OK state=%s(%d)" % (_COVER_STATES.get(state, "?"), state)
+            if what not in ("CLOSE", "OPEN"):
+                return "ERR usage: COVER STATE|CLOSE|OPEN|LIST|PROGID <id>"
+            want = 1 if what == "CLOSE" else 3
+            if state == want:
+                return "OK already %s" % _COVER_STATES[want]
+            if state == 0:
+                return "ERR driver reports NotPresent — is the FP2 powered and " \
+                       "its Control Panel app disconnected from the COM port?"
+            if what == "CLOSE":
+                c.CloseCover()
+            else:
+                c.OpenCover()
+            t0 = time.time()
+            while time.time() - t0 < 90.0:
+                time.sleep(1.0)
+                state = int(c.CoverState)
+                if state == want:
+                    return "OK cover %s after %.0fs" % (_COVER_STATES[want],
+                                                        time.time() - t0)
+                if state == 5:
+                    return "ERR driver reports Error while moving the cover"
+                if state != 2:                # not Moving and not there yet
+                    return "ERR cover stopped at %s(%d)" % (
+                        _COVER_STATES.get(state, "?"), state)
+            return "ERR cover did not reach %s within 90s (now %s)" % (
+                _COVER_STATES[want], _COVER_STATES.get(state, "?"))
+        finally:
+            try:
+                c.Connected = False       # release COM3 for the Control Panel
+                c.Dispose()
+            except Exception:
+                pass
+    except Exception as e:
+        return "ERR " + str(e)
+
+
+def park_mount(arg):
+    """PARK — stop tracking and send the mount somewhere safe for daylight.
+
+    Tries, in order: the driver's own Park, then FindHome, then a plain slew to
+    the pole with tracking off. Whichever runs, tracking is stopped LAST-resort
+    regardless, because a mount left tracking through the day walks the OTA
+    towards wherever the Sun happens to be.
+    """
+    try:
+        a = _mount()
+        if a.AtPark:
+            return "OK already parked"
+        how = []
+        try:
+            a.Tracking = False
+            how.append("tracking off")
+        except Exception as e:
+            how.append("could NOT stop tracking (%s)" % e)
+        if getattr(a, "CanPark", False):
+            a.Park()
+            t0 = time.time()
+            while time.time() - t0 < SLEW_TIMEOUT_S:
+                if a.AtPark:
+                    return "OK parked [driver Park] (%s)" % ", ".join(how)
+                time.sleep(1.0)
+            return "ERR Park() did not complete within %ds (%s)" % (
+                SLEW_TIMEOUT_S, ", ".join(how))
+        if getattr(a, "CanFindHome", False):
+            a.FindHome()
+            err = _wait_slew(a)
+            if err:
+                return "ERR FindHome: %s" % err
+            return "OK homed [FindHome] (%s)" % ", ".join(how)
+        # Last resort: the pole. Nothing to hit, and the aperture is as far
+        # from the ecliptic as this mount can put it.
+        a.SlewToCoordinatesAsync(a.SiderealTime % 24.0, 89.9)
+        err = _wait_slew(a)
+        if err:
+            return "ERR slew to pole: %s" % err
+        try:
+            a.Tracking = False
+        except Exception:
+            pass
+        return "OK slewed to the pole (no Park or FindHome in this driver) (%s)" % (
+            ", ".join(how))
+    except Exception as e:
+        return "ERR " + str(e)
+
+
+def mount_actions(arg):
+    """ACTIONS — READ ONLY. What custom ASCOM actions does this driver offer?
+
+    The ASI driver advertises ShutdownIfIdle and BeginShutdown; knowing exactly
+    what they are named is the difference between a clean daylight shutdown and
+    a guess.
+    """
+    try:
+        a = _mount()
+        acts = []
+        for x in a.SupportedActions:
+            acts.append(str(x))
+        return "OK CanPark=%s CanFindHome=%s AtPark=%s CanSetPark=%s actions=%s" % (
+            getattr(a, "CanPark", "?"), getattr(a, "CanFindHome", "?"),
+            getattr(a, "AtPark", "?"), getattr(a, "CanSetPark", "?"),
+            ",".join(acts))
+    except Exception as e:
+        return "ERR " + str(e)
+
+
 def mount_caps():
     """CAPS — READ ONLY. Driver properties that affect flip correctness.
 
@@ -887,6 +1068,12 @@ def handle(conn, addr):
                     reply = "OK moving to %d" % tgt
                 except Exception as e:
                     reply = "ERR " + str(e)
+        elif cmd == "COVER":
+            reply = cover(arg)
+        elif cmd == "PARK":
+            reply = park_mount(arg)
+        elif cmd == "ACTIONS":
+            reply = mount_actions(arg)
         elif cmd == "CTRLS":
             reply = cam_controls(arg)
         elif cmd == "CTRL":

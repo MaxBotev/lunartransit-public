@@ -209,6 +209,20 @@ DEFAULTS = {
     # obstruction needs patience -- the mount is still tracking correctly
     # behind the tree -- so this is deliberately long.
     "lost_grace_s": 900.0,
+    # --- end of session ------------------------------------------------------
+    # Park and close the flat panel's cover once the Moon is down, before the
+    # Sun gets high. Every step is verified and any failure aborts the rest:
+    # a rig left powered with a stuck cover is recoverable remotely, a rig shut
+    # down with one is not. Both shutdowns are separately opt-in.
+    "auto_daybreak": False,
+    "daybreak_below_elev_deg": 10.0,
+    "daybreak_grace_s": 600.0,
+    "daybreak_park": True,
+    "daybreak_close_cover": True,
+    "daybreak_shutdown_windows": False,
+    "daybreak_shutdown_pi": False,
+    "daybreak_windows_user": "",
+    "daybreak_windows_host": "",
     # --- exposure ------------------------------------------------------------
     # As dawn comes up the sky climbs into the Moon's own brightness. Every
     # keeper frame already reports sky and peak levels, so holding the disc in
@@ -516,6 +530,7 @@ class LunarTransitEngine:
         self._flip_running = False
         self._keeper = None         # periodic re-centre / stand-down
         self._acquiring = False     # a spiral search is running
+        self._daybreak = None       # end-of-session park / cover / shutdown
         self._acquire_checked = 0.0
         self.horizon = None         # local-horizon profile [(az, alt), ...]
         self._hrz_mtime = None
@@ -932,6 +947,20 @@ class LunarTransitEngine:
                              * math.cos(math.radians(float(el_all[i]))) / r_m)
         return math.sqrt(sig_t * sig_t + sig_p * sig_p + sig_h * sig_h)
 
+    def check_daybreak(self, cfg, moon, now):
+        """Park and cover up once the Moon is down for the night."""
+        if not cfg.get("auto_daybreak") or not cfg.get("capture_host"):
+            return
+        try:
+            import daybreak
+        except Exception:
+            return
+        if self._daybreak is None:
+            self._daybreak = daybreak.Daybreak(cfg, self.log_event)
+        self._daybreak.cfg = cfg                  # pick up live config edits
+        if self._daybreak.should_run(now, moon["el"]):
+            daybreak.start(cfg, self.log_event, moon["el"], self._daybreak)
+
     def capture_pending(self, cfg, now):
         """Is a transit capture running, armed, or about to start?
 
@@ -1129,6 +1158,7 @@ class LunarTransitEngine:
         self.check_meridian(cfg, moon, above_min_elev)
         self.check_keeper(cfg, moon, above_min_elev, now)
         self.check_acquire(cfg, moon, above_min_elev, now)
+        self.check_daybreak(cfg, moon, now)
 
         aircraft, adsb_age = self.read_aircraft()
         sim = self.sim_aircraft()
