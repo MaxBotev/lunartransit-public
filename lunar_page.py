@@ -148,6 +148,11 @@ LUNAR_HTML = r"""<!DOCTYPE html>
           <button class="btn" onclick="simulate()">🛰 SIMULATE TRANSIT</button>
         </div>
         <div class="row">
+          <button class="btn" id="opticsBtn" onclick="toggleOptics()"
+                  title="Which telescope is on the mount — this changes how the Moon is found and held">
+            🔭 OPTICS: …</button>
+        </div>
+        <div class="row">
           <button class="btn" id="findBtn" onclick="findMoon()"
                   title="Slews in a widening spiral until the disc appears, then centres and syncs">
             🔭 FIND MOON</button>
@@ -365,6 +370,43 @@ async function toggleRec(){
     rb.classList.toggle('live', recording);
   }
 }
+let OPTICS = null;
+async function loadOptics(){
+  try{
+    const r = await (await fetch('/api/lunar/optics')).json();
+    OPTICS = r;
+    const b = document.getElementById('opticsBtn');
+    if(!b || !r.ok) return;
+    b.textContent = '🔭 ' + r.name;
+    b.title = `${r.name} · ${r.focal_mm} mm · field ${r.fov_w_deg}° × ${r.fov_h_deg}°`
+      + ` · Moon is ${r.moon_vs_height}% of frame height`
+      + (r.strategy === 'narrow'
+         ? ' — Moon overfills the frame, holding it by dead reckoning'
+         : ' — disc fits, closed loop on the image')
+      + '. Click to switch.';
+    b.style.borderColor = r.strategy === 'narrow' ? '#c98a2b' : '#2b6fa8';
+    b.style.color = r.strategy === 'narrow' ? '#ffd166' : '#7fd4ff';
+  }catch(e){}
+}
+async function toggleOptics(){
+  if(!OPTICS) return;
+  const next = OPTICS.key === 'askar' ? 'c925' : 'askar';
+  const other = OPTICS.profiles ? (OPTICS.profiles[next] || {}).name : next;
+  if(!confirm(`Switch to ${other}?\n\nThis changes how the Moon is found and `
+      + `held. Only do it when that telescope is actually on the mount.`)) return;
+  const b = document.getElementById('opticsBtn');
+  b.disabled = true;
+  try{
+    await fetch('/api/lunar/optics', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({profile: next})});
+    await loadOptics();
+    document.getElementById('capMsg').textContent =
+      '🔭 optics profile is now ' + (OPTICS ? OPTICS.name : next)
+      + ' — re-sync on the Moon before relying on it';
+  }catch(e){ document.getElementById('capMsg').textContent = '❌ ' + e; }
+  finally{ b.disabled = false; }
+}
 async function findMoon(){
   const b = document.getElementById('findBtn'), msg = document.getElementById('capMsg');
   if(!confirm('Search for the Moon?\n\nThe mount will slew in a widening spiral '
@@ -405,6 +447,7 @@ async function simulate(){
   document.getElementById('capMsg').textContent = r.ok ? '🛰 simulation running' : '❌ ' + r.info;
 }
 poll(); setInterval(poll, 1000);
+loadOptics();
 </script>
 </body>
 </html>

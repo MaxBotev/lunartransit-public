@@ -229,6 +229,13 @@ DEFAULTS = {
     "traffic_prune_s": 1800.0,
     "traffic_max_rows": 2000000,
     "typical_crossing_s": 1.2,      # how long a plane takes to cross the disc
+    # --- which telescope is on the mount -------------------------------------
+    # "askar" (500 mm, disc fits, closed loop on the image) or "c925" (2350 mm,
+    # Moon overfills the frame, dead reckoning against the ephemeris).
+    "optics_profile": "askar",
+    "narrow_when_disc_frac": 0.85,
+    "narrow_interval_s": 120.0,
+    "narrow_max_step_arcsec": 900.0,
     # --- end of session ------------------------------------------------------
     # Park and close the flat panel's cover once the Moon is down, before the
     # Sun gets high. Every step is verified and any failure aborts the rest:
@@ -558,6 +565,7 @@ class LunarTransitEngine:
         self._daybreak = None       # end-of-session park / cover / shutdown
         self._last_lost_search = 0.0
         self.traffic = None         # lazily built recorder
+        self._narrow = None         # dead-reckoning keeper for long focal lengths
         self._last_aircraft = []
         self._acquire_checked = 0.0
         self.horizon = None         # local-horizon profile [(az, alt), ...]
@@ -1049,6 +1057,18 @@ class LunarTransitEngine:
             import meridian_flip
         except Exception:
             return
+        # At 2350 mm the disc does not fit the frame, so there is no edge to
+        # measure and the image-based keeper would calibrate against the frame's
+        # own dimensions. Dead-reckon against the ephemeris instead.
+        try:
+            import optics
+            narrow = optics.is_narrow(cfg)
+        except Exception:
+            narrow = False
+        if narrow:
+            self.check_keeper_narrow(cfg, moon, now)
+            return
+
         if self._keeper is None:
             self._keeper = meridian_flip.start_keeper(cfg, self, self.log_event)
         k = self._keeper
@@ -1092,6 +1112,21 @@ class LunarTransitEngine:
             threading.Thread(
                 target=k.tick, args=(now, moon["el"], cfg["lunar_min_elev_deg"]),
                 name="moon-keeper", daemon=True).start()
+
+    def check_keeper_narrow(self, cfg, moon, now):
+        """Keeper for a telescope where the Moon overfills the frame."""
+        try:
+            import moon_narrow
+        except Exception:
+            return
+        if self._narrow is None:
+            self._narrow = moon_narrow.NarrowKeeper(cfg, self, self.log_event)
+        self._narrow.cfg = cfg
+        active = bool(self.capture.snapshot(now).get("recording"))
+        if self._narrow.should_run(now, moon["el"], cfg["lunar_min_elev_deg"],
+                                   active):
+            threading.Thread(target=self._narrow.tick, args=(now,),
+                             name="moon-narrow", daemon=True).start()
 
     def check_acquire(self, cfg, moon, above_min_elev, now, force=False):
         """Once per night, make sure the Moon is actually in the frame.
