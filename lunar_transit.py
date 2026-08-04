@@ -236,6 +236,13 @@ DEFAULTS = {
     "narrow_when_disc_frac": 0.85,
     "narrow_interval_s": 120.0,
     "narrow_max_step_arcsec": 900.0,
+    # Where to point relative to the Moon's centre: "centre", or "region" to
+    # lock onto a selenographic coordinate (recomputed as libration moves it).
+    "aim_mode": "centre",
+    "aim_region_lat": None,
+    "aim_region_lon": None,
+    "aim_region_name": "",
+    "aim_max_radius_frac": 1.0,
     # --- end of session ------------------------------------------------------
     # Park and close the flat panel's cover once the Moon is down, before the
     # Sun gets high. Every step is verified and any failure aborts the rest:
@@ -1120,7 +1127,8 @@ class LunarTransitEngine:
         except Exception:
             return
         if self._narrow is None:
-            self._narrow = moon_narrow.NarrowKeeper(cfg, self, self.log_event)
+            obs = Observer(cfg["home_lat"], cfg["home_lon"], cfg["home_alt_m"])
+            self._narrow = moon_narrow.NarrowKeeper(cfg, self, self.log_event, obs)
         self._narrow.cfg = cfg
         active = bool(self.capture.snapshot(now).get("recording"))
         if self._narrow.should_run(now, moon["el"], cfg["lunar_min_elev_deg"],

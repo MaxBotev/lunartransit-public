@@ -37,13 +37,15 @@ from meridian_flip import FlipError, _kv, _talk
 class NarrowKeeper:
     """Keeps a frame-filling Moon in place by dead reckoning."""
 
-    def __init__(self, cfg, engine, log):
+    def __init__(self, cfg, engine, log, observer=None):
         self.cfg = cfg
         self.engine = engine
         self.log = log
+        self.observer = observer
         self.last = 0.0
         self.busy = False
         self.corrections = 0
+        self._warned_region = False
 
     def say(self, text, **kw):
         self.log("narrow", text, **kw)
@@ -67,6 +69,14 @@ class NarrowKeeper:
                 return
             mra, mdec = float(st["ra"]), float(st["dec"])
             ra, dec = self.engine.moon_radec_at(time.time())
+            off_e, off_n, what = self.aim_offset(time.time())
+            cosd0 = math.cos(math.radians(max(-89.0, min(89.0, dec))))
+            if off_e or off_n:
+                # East on the sky is +RA, north is +Dec, so the offset drops
+                # straight in. It is recomputed every tick because libration
+                # keeps moving a fixed lunar feature across the apparent disc.
+                ra += off_e / 3600.0 / 15.0 / max(cosd0, 1e-3)
+                dec += off_n / 3600.0
 
             cosd = math.cos(math.radians(max(-89.0, min(89.0, dec))))
             dra = (ra - mra) * 15.0 * 3600.0 * cosd     # arcsec on sky
@@ -94,13 +104,55 @@ class NarrowKeeper:
 
             self.cmd("NUDGE %.1f %.1f" % (dra, ddec))
             self.corrections += 1
-            self.say("dead-reckoned %.0f arcsec back onto the ephemeris "
-                     "(dRA %+.0f dDec %+.0f)" % (err, dra, ddec),
-                     err_arcsec=round(err))
+            self.say("dead-reckoned %.0f arcsec back onto %s "
+                     "(dRA %+.0f dDec %+.0f)" % (err, what, dra, ddec),
+                     err_arcsec=round(err), aim=what)
         except Exception as e:
             self.say("correction failed: %s" % e, ok=False)
         finally:
             self.busy = False
+
+
+    def aim_offset(self, now):
+        """Where to point relative to the Moon's centre: (east", north", label).
+
+        With a disc four times the frame, "the Moon" is not a target. Locking
+        onto a selenographic coordinate is, and it has to be recomputed
+        continuously: libration swings a fixed feature by hundreds of arcsec
+        across a night, which at this scale is several frame widths.
+        """
+        mode = str(self.cfg.get("aim_mode") or "centre").lower()
+        if mode != "region":
+            return 0.0, 0.0, "the Moon's centre"
+        lat = self.cfg.get("aim_region_lat")
+        lon = self.cfg.get("aim_region_lon")
+        if lat is None or lon is None or self.observer is None:
+            return 0.0, 0.0, "the Moon's centre"
+        try:
+            import lunar_features
+            o = lunar_features.feature_offset(self.engine, self.observer, now,
+                                              float(lat), float(lon))
+        except Exception as e:
+            if not self._warned_region:
+                self._warned_region = True
+                self.say("cannot compute the lunar region offset (%s) — "
+                         "falling back to the disc centre" % e, ok=False)
+            return 0.0, 0.0, "the Moon's centre"
+        if not o["visible"] and not self._warned_region:
+            self._warned_region = True
+            self.say("%.2fN %.2fE is on the far side right now (libration puts "
+                     "it %.0f%% of a radius out) — aiming at the limb above it, "
+                     "which is where an ejecta plume would appear"
+                     % (float(lat), float(lon), 100 * o["limb_fraction"]),
+                     ok=False)
+        # Clamp to the limb: a point round the back projects onto the edge, and
+        # pointing further would take the Moon out of frame entirely.
+        e_as, n_as = o["d_east_arcsec"], o["d_north_arcsec"]
+        r = math.hypot(e_as, n_as)
+        lim = o["moon_radius_arcsec"] * float(self.cfg.get("aim_max_radius_frac", 1.0))
+        if r > lim and r > 0:
+            e_as, n_as = e_as * lim / r, n_as * lim / r
+        return e_as, n_as, "%.1fN %.1fE on the Moon" % (float(lat), float(lon))
 
 
 def frame_state(reply, cfg):
