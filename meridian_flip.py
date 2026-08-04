@@ -280,6 +280,26 @@ class Flipper:
         dx_dec, dy_dec = (m[0] - bx) / step, (m[1] - by) / step
         self.cmd("NUDGE 0 %.1f" % (-step))
 
+        # The same cross-check the clipped-disc path has had since a backlash
+        # artefact threw the Moon out of the field. It was never added here, so
+        # the identical fault walked straight through the unguarded route: on
+        # 2026-08-04 at 09:47 this returned 0.44 px/arcsec against a true 0.83,
+        # and the centring loop oscillated -2650, +2370, -2037 and gave up with
+        # the Moon still off-centre.
+        try:
+            want = 1.0 / (self.engine.moon_angular_diameter_arcsec()
+                          / max(1.0, base[2]))
+        except Exception:
+            want = None
+        if want:
+            for nm, vec in (("RA", (dx_ra, dy_ra)), ("Dec", (dx_dec, dy_dec))):
+                mag = math.hypot(*vec)
+                if not (0.65 * want <= mag <= 1.35 * want):
+                    raise FlipError(
+                        "%s probe disagrees with the disc\'s own scale (%.2f vs "
+                        "%.2f px/arcsec) — refusing to centre on it"
+                        % (nm, mag, want))
+
         det = dx_ra * dy_dec - dx_dec * dy_ra
         if abs(det) < 1e-9:
             # Two very different faults look identical here, so say which.
@@ -516,6 +536,23 @@ def last_focus(host):
         except (TypeError, ValueError):
             return None
     return num(d.get("pos")), num(d.get("temp"))
+
+
+def _num(d, keys, default=0.0):
+    """First numeric value among several possible key spellings.
+
+    The listener reports whatever the camera calls things, and this one says
+    Minimum/Maximum where the code expected MinValue/MaximumValue -- so both
+    read as zero and the gain loop concluded it had no range to work with.
+    """
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, "", "None"):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return default
 
 
 def rig_busy(host, port, settle_s=30.0, timeout=30.0):
@@ -894,8 +931,8 @@ class Keeper:
             self._say("exposure control reports an unparseable value (%r)"
                       % got.get("Value"), ok=False)
             return
-        emin = float(got.get("MinValue") or 0.0)
-        emax = float(got.get("MaximumValue") or got.get("MaxValue") or 0.0)
+        emin = _num(got, ("MinValue", "Minimum", "Min"), 0.0)
+        emax = _num(got, ("MaximumValue", "MaxValue", "Maximum", "Max"), 0.0)
         mult = (self._exposure_to_seconds(got.get("Unit"))
                 or self._infer_exposure_unit(emin, emax))
         # Exposure IS linear in brightness, so a proportional step converges
@@ -950,14 +987,28 @@ class Keeper:
                       % e, ok=False)
             self._gain_ok = False
             return None
+        # "Gain" is not the only control with "gain" in its name. This camera
+        # also lists "Exposure/Gain Shift" -- a -6..+6 trim -- and lists it
+        # FIRST, so taking the first substring match picked that instead, read
+        # a range it could not use, and switched the whole loop off for the
+        # night. An exact name wins; a partial match must not look like a
+        # modifier of something else.
+        blocks = []
         for block in reply[3:].split("|"):
-            got = dict(p.split("=", 1) for p in block.strip().split(";")
-                       if "=" in p)
-            if "gain" in got.get("name", "").lower():
+            got = dict(kv.split("=", 1) for kv in block.strip().split(";")
+                       if "=" in kv)
+            if got.get("name"):
+                blocks.append(got)
+        exact = [g for g in blocks if g["name"].strip().lower() == "gain"]
+        loose = [g for g in blocks if "gain" in g["name"].lower()
+                 and not any(w in g["name"].lower()
+                             for w in ("shift", "offset", "auto", "target"))]
+        for got in exact + loose:
+            if True:
                 self._gain_ctl = got["name"]
-                self._gain_lo = float(got.get("MinValue") or 0.0)
-                self._gain_hi = float(got.get("MaximumValue")
-                                      or got.get("MaxValue") or 0.0)
+                self._gain_lo = _num(got, ("MinValue", "Minimum", "Min"), 0.0)
+                self._gain_hi = _num(got, ("MaximumValue", "MaxValue",
+                                           "Maximum", "Max"), 0.0)
                 if self._gain_hi <= self._gain_lo:
                     self._say("gain control '%s' reports no usable range "
                               "(%s..%s) — exposure loop off"

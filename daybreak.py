@@ -122,15 +122,29 @@ class Daybreak:
             self.busy = False
 
     def _run(self, moon_el):
-        # Last line of defence, and the one the operator asked for directly: a
-        # mount that is not tracking is a mount nobody has started a session on
-        # -- or one already shut down. Either way it is not ours to move.
+        # The tracking check is a fallback, NOT the discriminator. `armed` is:
+        # it is set only once the Moon has genuinely been up this run, so by
+        # the time this runs a session demonstrably happened.
+        #
+        # Making tracking a veto on top of that was wrong, and it cost a night.
+        # "Not tracking" cannot tell "nobody started a session" from "the
+        # session is over" -- and at the end of one it is usually off, because
+        # the keeper stands down when the Moon sets, or the mount hits its own
+        # limit, or the operator stops it. On 2026-08-04 daybreak fired exactly
+        # on time at 11:38, found tracking off, and left the cover open with
+        # the Sun coming up: precisely the outcome it exists to prevent.
+        #
+        # So tracking only vetoes when the session was never armed.
         st = _kv(self.cmd("MOUNT", timeout=30.0))
-        if str(st.get("tracking", "")).lower() != "true":
+        tracking = str(st.get("tracking", "")).lower() == "true"
+        if not tracking and not self.armed:
             self.done = True
             raise FlipError(
-                "the mount is not tracking, so there is no session to end — "
-                "leaving it exactly where it is")
+                "the mount is not tracking and the Moon was never up this run — "
+                "there is no session to end, leaving it exactly where it is")
+        if not tracking:
+            self.say("mount is no longer tracking, as expected at the end of a "
+                     "session — closing up anyway")
 
         self.say("Moon is down (%.1f deg) — putting the rig to bed" % moon_el)
 
@@ -141,8 +155,14 @@ class Daybreak:
             self.say("could not stop the capture (%s) — continuing" % e, ok=False)
 
         # 2. park. A mount left tracking walks the OTA across the sky all day.
+        #    A failed park must not stop the cover closing -- the cover is what
+        #    actually protects the optics, and it is the later step.
         if self.cfg.get("daybreak_park", True):
-            self.say(self.cmd("PARK", timeout=240.0)[3:].strip())
+            try:
+                self.say(self.cmd("PARK", timeout=240.0)[3:].strip())
+            except FlipError as e:
+                self.say("park failed (%s) — continuing to the cover, which is "
+                         "what protects the optics" % e, ok=False)
 
         # 3. the cover. This is the step the whole sequence exists for.
         closed = not self.cfg.get("daybreak_close_cover", True)
