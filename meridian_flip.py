@@ -496,6 +496,24 @@ def sync_to_moon(cfg, engine, log, max_offset_arcmin=8.0):
 # lasts under a second and cannot be repeated; an autofocus run is minutes of
 # the operator's time. Both must win over re-centring.
 _FOCUS_SEEN = {}          # host -> (position, when that position was first seen)
+# Last CAPST reading per host. rig_busy already fetches focuser position and
+# temperature every pass and then threw them away, so there was no temperature
+# history at all when one was wanted -- "what was it at 09:00?" had no answer.
+# Keeping the reading costs nothing and makes the keeper's log a temperature
+# record, which is also what a focus-compensation coefficient would be built
+# from.
+_LAST_CAPST = {}
+
+
+def last_focus(host):
+    """(position, temperature) from the most recent CAPST, or (None, None)."""
+    d = _LAST_CAPST.get(host) or {}
+    def num(v):
+        try:
+            return round(float(v), 2)
+        except (TypeError, ValueError):
+            return None
+    return num(d.get("pos")), num(d.get("temp"))
 
 
 def rig_busy(host, port, settle_s=30.0, timeout=30.0):
@@ -511,6 +529,7 @@ def rig_busy(host, port, settle_s=30.0, timeout=30.0):
         st = _kv(_talk(host, port, "CAPST", timeout=timeout))
     except Exception as e:
         return "cannot reach the capture PC (%s)" % e
+    _LAST_CAPST[host] = dict(st, t=time.time())
     if str(st.get("capturing", "")).lower() == "true":
         return "SharpCap is capturing"
     if str(st.get("moving", "")).lower() == "true":
@@ -575,6 +594,8 @@ class Keeper:
         self._gain_pending = None   # peak before the last change, for verification
         self._gain_deaf = 0
         self._pier = None           # last pier side the rotation was measured on
+        self._last_sky = None
+        self._last_peak = None
 
     def _say(self, text, **kw):
         self.log("keeper", text, **kw)
@@ -666,10 +687,13 @@ class Keeper:
                 return
             rate = ("drift %.1f arcsec/min over %.1f min"
                     % (err / gap_min, gap_min)) if gap_min >= 0.5 else "first pass"
+            fpos, ftemp = last_focus(self.full["capture_host"])
             self._say("re-centred: %.0f -> %.0f arcsec (%s)"
                       % (err, err2, rate),
                       before_arcsec=round(err), after_arcsec=round(err2),
-                      gap_min=round(gap_min, 1))
+                      gap_min=round(gap_min, 1),
+                      focus_pos=fpos, focus_temp_c=ftemp, sky=self._last_sky,
+                      peak=self._last_peak)
         except Exception as e:
             self._on_miss(now, e)
         finally:
@@ -948,6 +972,7 @@ class Keeper:
             peak, sky = float(d["peak"]), float(d["sky"])
         except Exception:
             return
+        self._last_sky, self._last_peak = int(sky), int(peak)
         lo = float(self.full.get("gain_target_lo", 170.0))
         hi = float(self.full.get("gain_target_hi", 235.0))
 
