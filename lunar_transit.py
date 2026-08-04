@@ -202,6 +202,9 @@ DEFAULTS = {
     # then sync -- after which no further searching is needed on that pier side.
     "auto_acquire": False,          # off by default: it commands mount motion
     "acquire_recheck_s": 1800.0,    # how often to re-verify the Moon is in frame
+    # Only chase a Moon that was in frame earlier this run. Set False for a rig
+    # that is genuinely never attended, where a cold acquisition is wanted.
+    "acquire_only_after_seen": True,
     # Anything that moves the mount yields to a transit capture and to an
     # autofocus run. A transit lasts under a second and never repeats.
     "adjust_guard_s": 120.0,        # hands off this long before a capture
@@ -1106,6 +1109,19 @@ class LunarTransitEngine:
             return
         if not above_min_elev or self._acquiring:
             return
+        # Recover a Moon we HAD and lost -- do not go hunting for one we have
+        # never seen. At the start of a session the operator is standing at the
+        # mount doing exactly this job, and having the rig slew off on its own
+        # mid-setup is startling and unhelpful, however correct the geometry.
+        # Once the keeper has genuinely had the disc in frame, an unattended
+        # recovery is welcome; before that it is interference.
+        # (This is the same rule that stopped daybreak parking a scope that had
+        # just been set up -- it should have been applied everywhere the first
+        # time it was asked for, not only there.)
+        if cfg.get("acquire_only_after_seen", True) and not force:
+            k = self._keeper
+            if k is None or not getattr(k, "last_seen", 0.0):
+                return
         if (not force and now - self._acquire_checked
                 < float(cfg.get("acquire_recheck_s", 1800.0))):
             return
