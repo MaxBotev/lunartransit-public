@@ -210,6 +210,22 @@ DEFAULTS = {
     # behind the tree -- so this is deliberately long.
     "lost_grace_s": 900.0,
     "lost_retry_s": 600.0,          # min gap between recovery searches
+    # --- traffic recording (for site scoring) --------------------------------
+    # Where aircraft actually fly, binned so the table saturates instead of
+    # growing. Off by default; costs a dict update per tick when on.
+    "traffic_log": False,
+    "traffic_max_km": 80.0,
+    "traffic_min_alt_ft": 1500.0,
+    "traffic_bin_deg": 0.002,
+    "traffic_bin_ft": 500.0,
+    "traffic_hours_per_bucket": 3,
+    "traffic_sample_s": 2.0,
+    "traffic_flush_s": 60.0,
+    "traffic_retain_days": 7.0,
+    "traffic_min_hits": 2,
+    "traffic_prune_s": 1800.0,
+    "traffic_max_rows": 2000000,
+    "typical_crossing_s": 1.2,      # how long a plane takes to cross the disc
     # --- end of session ------------------------------------------------------
     # Park and close the flat panel's cover once the Moon is down, before the
     # Sun gets high. Every step is verified and any failure aborts the rest:
@@ -538,6 +554,8 @@ class LunarTransitEngine:
         self._acquiring = False     # a spiral search is running
         self._daybreak = None       # end-of-session park / cover / shutdown
         self._last_lost_search = 0.0
+        self.traffic = None         # lazily built recorder
+        self._last_aircraft = []
         self._acquire_checked = 0.0
         self.horizon = None         # local-horizon profile [(az, alt), ...]
         self._hrz_mtime = None
@@ -917,6 +935,7 @@ class LunarTransitEngine:
                         observer, cfg["lunar_min_elev_deg"])
                 self.step(cfg, observer, moon, now)
                 self.capture.tick(now, cfg, self.log_event)
+                self.record_traffic(cfg, observer, now)
             except Exception as e:
                 with self.lock:
                     self.snap = {"ok": False, "message": f"loop error: {e}"}
@@ -953,6 +972,28 @@ class LunarTransitEngine:
         sig_h = math.degrees(float(cfg.get("site_alt_sigma_m", 10.0))
                              * math.cos(math.radians(float(el_all[i]))) / r_m)
         return math.sqrt(sig_t * sig_t + sig_p * sig_p + sig_h * sig_h)
+
+    def record_traffic(self, cfg, observer, now):
+        """Bin this tick's contacts for later site analysis.
+
+        The write is deferred to a worker: SQLite is fast, but "fast" is not
+        "on the thread that has to fire REC within a second of a transit".
+        """
+        if not cfg.get("traffic_log"):
+            return
+        try:
+            if self.traffic is None:
+                import traffic_db
+                self.traffic = traffic_db.Recorder(cfg, self.log_event)
+            self.traffic.cfg.update(
+                (k, cfg[k]) for k in self.traffic.cfg if k in cfg)
+            self.traffic.observe(self._last_aircraft or [], observer.lat,
+                                 observer.lon, now)
+            if self.traffic.due(now):
+                threading.Thread(target=self.traffic.flush, args=(now,),
+                                 name="traffic-flush", daemon=True).start()
+        except Exception as e:
+            self.log_event("traffic", "traffic recording error: %s" % e, ok=False)
 
     def check_daybreak(self, cfg, moon, now):
         """Park and cover up once the Moon is down for the night."""
@@ -1176,6 +1217,7 @@ class LunarTransitEngine:
         self.check_daybreak(cfg, moon, now)
 
         aircraft, adsb_age = self.read_aircraft()
+        self._last_aircraft = aircraft      # reused by the traffic recorder
         sim = self.sim_aircraft()
 
         # A dead dump1090 or a stalled remote feed freezes the whole file, and

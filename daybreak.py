@@ -29,7 +29,7 @@ import subprocess
 import threading
 import time
 
-from meridian_flip import FlipError, _talk
+from meridian_flip import FlipError, _kv, _talk
 
 DEFAULTS = {
     "auto_daybreak": False,          # master switch
@@ -46,6 +46,8 @@ DEFAULTS = {
     # listener cannot autodetect. Held here rather than in the listener because
     # the listener's global resets every time the script is re-run.
     "cover_progid": "",
+    "daybreak_retry_s": 1800.0,      # never retry a failure in a tight loop
+    "daybreak_max_tries": 3,
 }
 
 
@@ -58,6 +60,9 @@ class Daybreak:
         self.done = False
         self.below_since = None
         self.busy = False
+        self.armed = False          # has the Moon actually been up this run?
+        self.last_try = 0.0
+        self.attempts = 0
 
     def say(self, text, **kw):
         self.log("daybreak", text, **kw)
@@ -67,35 +72,66 @@ class Daybreak:
 
     # ---- trigger ---------------------------------------------------------
     def should_run(self, now, moon_el):
-        """Only once, only when the Moon has been down for a while.
+        """Only once, only at the END of a session that actually happened.
 
-        The grace period matters: elevation crosses the threshold once per
-        night, but a single sample near the boundary -- or a restart -- should
-        not trigger a shutdown on its own.
+        "The Moon is below ten degrees" is true twice a night -- once before it
+        rises and once after it sets -- and the first version could not tell
+        them apart. On 2026-08-03 it fired at 23:03 with the Moon at 2.7 deg
+        and CLIMBING, parked a telescope that its owner had just set up, and
+        left it pointing west at the horizon. Then it retried every thirty
+        seconds for half an hour.
+
+        So a session has to have happened first. That is what `armed` records:
+        it is set only once the Moon has genuinely been up this run, and until
+        then nothing here touches anything.
         """
         if self.done or self.busy or not self.cfg.get("auto_daybreak"):
             return False
         floor = float(self.cfg.get("daybreak_below_elev_deg", 10.0))
         if moon_el >= floor:
+            self.armed = True            # a session is under way
             self.below_since = None
             return False
+        if not self.armed:
+            return False                 # the Moon has not risen yet tonight
         if self.below_since is None:
             self.below_since = now
             return False
-        return now - self.below_since >= float(self.cfg.get("daybreak_grace_s", 600.0))
+        if now - self.below_since < float(self.cfg.get("daybreak_grace_s", 600.0)):
+            return False
+        # A failed attempt must not become a loop. The first version retried
+        # every tick and issued forty PARKs in half an hour.
+        return now - self.last_try >= float(self.cfg.get("daybreak_retry_s", 1800.0))
 
     # ---- the sequence ----------------------------------------------------
     def run(self, moon_el):
         self.busy = True
+        self.last_try = time.time()
+        self.attempts += 1
         try:
             self._run(moon_el)
         except Exception as e:
+            give_up = self.attempts >= int(self.cfg.get("daybreak_max_tries", 3))
+            if give_up:
+                self.done = True
             self.say("DAYBREAK ABORTED: %s — everything left powered and as-is, "
-                     "check the rig" % e, ok=False)
+                     "check the rig%s" % (e, ". Giving up for tonight after %d "
+                                          "attempts." % self.attempts if give_up
+                                          else ""), ok=False)
         finally:
             self.busy = False
 
     def _run(self, moon_el):
+        # Last line of defence, and the one the operator asked for directly: a
+        # mount that is not tracking is a mount nobody has started a session on
+        # -- or one already shut down. Either way it is not ours to move.
+        st = _kv(self.cmd("MOUNT", timeout=30.0))
+        if str(st.get("tracking", "")).lower() != "true":
+            self.done = True
+            raise FlipError(
+                "the mount is not tracking, so there is no session to end — "
+                "leaving it exactly where it is")
+
         self.say("Moon is down (%.1f deg) — putting the rig to bed" % moon_el)
 
         # 1. never leave a recording running
