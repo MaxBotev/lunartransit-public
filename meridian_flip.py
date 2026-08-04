@@ -503,6 +503,8 @@ _FOCUS_SEEN = {}          # host -> (position, when that position was first seen
 # record, which is also what a focus-compensation coefficient would be built
 # from.
 _LAST_CAPST = {}
+_CAPST_WARNED = False
+_LOG = [None]                       # set by the keeper so rig_busy can report
 
 
 def last_focus(host):
@@ -528,7 +530,20 @@ def rig_busy(host, port, settle_s=30.0, timeout=30.0):
     try:
         st = _kv(_talk(host, port, "CAPST", timeout=timeout))
     except Exception as e:
-        return "cannot reach the capture PC (%s)" % e
+        # Do NOT block on this. CAPST is a convenience check -- the Pi already
+        # knows about its own captures, which is the safety-critical part, and
+        # the focuser reading is a nicety on top. Treating an unavailable CAPST
+        # as a reason to stand down let one dead device (a focuser that dropped
+        # off its USB bus) silently disable re-centring for the whole night,
+        # while everything it actually depends on was working perfectly.
+        global _CAPST_WARNED
+        if not _CAPST_WARNED:
+            _CAPST_WARNED = True
+            if _LOG[0]:
+                _LOG[0]("keeper", "CAPST is not answering (%s) — carrying on "
+                                  "without the autofocus check; the capture "
+                                  "guard is unaffected" % e, ok=False)
+        return None
     _LAST_CAPST[host] = dict(st, t=time.time())
     if str(st.get("capturing", "")).lower() == "true":
         return "SharpCap is capturing"
@@ -596,6 +611,7 @@ class Keeper:
         self._pier = None           # last pier side the rotation was measured on
         self._last_sky = None
         self._last_peak = None
+        _LOG[0] = log               # so rig_busy can explain itself once
 
     def _say(self, text, **kw):
         self.log("keeper", text, **kw)

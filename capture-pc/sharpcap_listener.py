@@ -29,7 +29,7 @@ import traceback
 # running listener actually the file on disk?" is one round trip instead of a
 # guess -- a stale listener has silently wasted three debugging cycles here,
 # each time looking exactly like a code bug.
-LISTENER_VERSION = "2026-08-03d"
+LISTENER_VERSION = "2026-08-04a"
 
 PORT = 5580
 MAX_CAPTURE_S = 120     # safety: force-stop if STOP never arrives
@@ -1306,13 +1306,26 @@ def handle(conn, addr):
         elif cmd == "CTRL":
             reply = cam_control_set(arg)
         elif cmd == "CAPST":
-            cam = SharpCap.SelectedCamera  # noqa: F821
-            f = SharpCap.Focusers.SelectedFocuser  # noqa: F821
+            # Every read here is guarded separately. A .NET property on a
+            # disconnected device THROWS rather than returning None, and this
+            # used to read four of them bare: when the focuser dropped off the
+            # bus, CAPST died without replying at all, the Pi read that as
+            # "capture PC unreachable", and the re-centring engine skipped
+            # every pass for forty-five minutes without the Moon ever moving
+            # back into frame. A missing focuser must cost its own two fields
+            # and nothing else.
+            def _safe(fn, default="?"):
+                try:
+                    return fn()
+                except Exception:
+                    return default
+            cam = _safe(lambda: SharpCap.SelectedCamera, None)  # noqa: F821
+            f = _safe(lambda: SharpCap.Focusers.SelectedFocuser, None)  # noqa: F821
             reply = "OK capturing=%s moving=%s pos=%s temp=%s" % (
-                _capturing(cam) if cam else None,
-                f.IsMoving if f is not None else None,
-                f.Position if f is not None else None,
-                getattr(f, "Temperature", None) if f is not None else None)
+                _safe(lambda: _capturing(cam)) if cam is not None else None,
+                _safe(lambda: f.IsMoving) if f is not None else None,
+                _safe(lambda: f.Position) if f is not None else None,
+                _safe(lambda: f.Temperature) if f is not None else None)
         elif cmd == "SNAP":
             cam = SharpCap.SelectedCamera  # noqa: F821
             if cam is None:
