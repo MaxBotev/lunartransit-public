@@ -50,6 +50,7 @@ DEFAULTS = {
     "traffic_bin_deg": 0.002,      # ~220 m; about one lunar diameter at 15 km
     "traffic_bin_ft": 500.0,
     "traffic_hours_per_bucket": 3,  # 8 buckets a day
+    "traffic_split_weekend": True,  # keep weekday and weekend traffic apart
     "traffic_sample_s": 2.0,       # bin at most this often; an aircraft crosses
                                    # a 220 m bin in about a second at cruise, so
                                    # 1 Hz records almost every cell twice over
@@ -76,12 +77,28 @@ def init(path=None):
                         lonb INTEGER NOT NULL,
                         altb INTEGER NOT NULL,
                         tod  INTEGER NOT NULL,
+                        dow  INTEGER NOT NULL DEFAULT 0,
                         n    INTEGER NOT NULL,
                         last_t INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (latb, lonb, altb, tod))""")
+                        PRIMARY KEY (latb, lonb, altb, tod, dow))""")
         cols = [r[1] for r in c.execute("PRAGMA table_info(traffic)")]
         if "last_t" not in cols:                 # upgrade an older database
             c.execute("ALTER TABLE traffic ADD COLUMN last_t INTEGER NOT NULL DEFAULT 0")
+        if "dow" not in cols:
+            # dow belongs in the primary key, which SQLite cannot alter, so the
+            # table is rebuilt. Existing rows keep their counts and land in the
+            # weekday bucket -- imprecise for one window, and self-correcting
+            # once a week of real data has come through.
+            c.execute("ALTER TABLE traffic RENAME TO traffic_old")
+            c.execute("""CREATE TABLE traffic (
+                            latb INTEGER NOT NULL, lonb INTEGER NOT NULL,
+                            altb INTEGER NOT NULL, tod INTEGER NOT NULL,
+                            dow INTEGER NOT NULL DEFAULT 0, n INTEGER NOT NULL,
+                            last_t INTEGER NOT NULL DEFAULT 0,
+                            PRIMARY KEY (latb, lonb, altb, tod, dow))""")
+            c.execute("INSERT INTO traffic (latb,lonb,altb,tod,dow,n,last_t) "
+                      "SELECT latb,lonb,altb,tod,0,n,last_t FROM traffic_old")
+            c.execute("DROP TABLE traffic_old")
         c.execute("CREATE INDEX IF NOT EXISTS traffic_last_t ON traffic(last_t)")
         c.execute("""CREATE TABLE IF NOT EXISTS meta (
                         k TEXT PRIMARY KEY, v TEXT)""")
@@ -134,7 +151,15 @@ class Recorder:
         hpb = max(1, int(self.cfg["traffic_hours_per_bucket"]))
         # Local time of day: traffic patterns are diurnal, and the Moon is only
         # observable at some hours, so the two have to be matched up later.
-        tod = int(time.localtime(now).tm_hour) // hpb
+        lt = time.localtime(now)
+        tod = int(lt.tm_hour) // hpb
+        # Weekday and weekend traffic are genuinely different -- fewer airline
+        # departures, more light aircraft -- and a site is usually judged for
+        # one or the other. Two buckets doubles the table at worst; per-DATE
+        # bins would multiply it by the whole retention window, for a
+        # distinction nobody plans an observing trip around.
+        dow = 1 if (self.cfg.get("traffic_split_weekend", True)
+                    and lt.tm_wday >= 5) else 0
 
         coslat = math.cos(math.radians(home_lat))
         add = {}
@@ -149,7 +174,7 @@ class Recorder:
             key = (int(math.floor(a["lat"] / bd)),
                    int(math.floor(a["lon"] / bd)),
                    int(math.floor(alt / bft)),
-                   tod)
+                   tod, dow)
             add[key] = add.get(key, 0) + 1
         if not add:
             return
@@ -174,11 +199,12 @@ class Recorder:
             try:
                 ts = int(now)
                 c.executemany(
-                    "INSERT INTO traffic (latb,lonb,altb,tod,n,last_t) "
-                    "VALUES (?,?,?,?,?,?) "
-                    "ON CONFLICT(latb,lonb,altb,tod) DO UPDATE SET "
+                    "INSERT INTO traffic (latb,lonb,altb,tod,dow,n,last_t) "
+                    "VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(latb,lonb,altb,tod,dow) DO UPDATE SET "
                     "n = n + excluded.n, last_t = excluded.last_t",
-                    [(k[0], k[1], k[2], k[3], v, ts) for k, v in batch.items()])
+                    [(k[0], k[1], k[2], k[3], k[4], v, ts)
+                     for k, v in batch.items()])
                 c.commit()
                 self.flushed += len(batch)
                 if now - self.last_prune >= float(self.cfg["traffic_prune_s"]):
@@ -233,15 +259,52 @@ class Recorder:
         return out
 
 
-def load_bins(path=None, tod=None):
-    """Every occupied bin as (lat, lon, alt_ft, tod, n), centres not corners."""
+def _filter(tod, dow):
+    where, args = [], []
+    if tod is not None and tod != "":
+        where.append("tod = ?")
+        args.append(int(tod))
+    if dow is not None and dow != "":
+        where.append("dow = ?")
+        args.append(int(dow))
+    return ((" WHERE " + " AND ".join(where)) if where else ""), args
+
+
+def load_bins(path=None, tod=None, dow=None):
+    """Every occupied bin as (latb, lonb, altb, tod, n) for the scorer."""
     c = _conn(path)
     try:
-        q = "SELECT latb,lonb,altb,tod,n FROM traffic"
-        args = ()
-        if tod is not None:
-            q += " WHERE tod = ?"
-            args = (int(tod),)
-        return c.execute(q, args).fetchall()
+        w, args = _filter(tod, dow)
+        return c.execute("SELECT latb,lonb,altb,tod,n FROM traffic" + w,
+                         args).fetchall()
+    finally:
+        c.close()
+
+
+def cloud(path=None, tod=None, dow=None, coarsen=5, alt_coarsen=4, limit=40000):
+    """Traffic as a point cloud for display, re-binned coarser.
+
+    The stored grid is far finer than a browser wants to draw -- hundreds of
+    thousands of bins, most of them one pixel apart at any sane zoom. Merging
+    them down loses nothing visible and keeps the payload sane. Busiest first,
+    so a cap trims the faint edges rather than an arbitrary corner of the map.
+    """
+    c = _conn(path)
+    try:
+        w, args = _filter(tod, dow)
+        q = ("SELECT latb/?*?, lonb/?*?, altb/?*?, SUM(n) AS s FROM traffic" + w +
+             " GROUP BY 1,2,3 ORDER BY s DESC LIMIT ?")
+        p = [coarsen, coarsen, coarsen, coarsen, alt_coarsen, alt_coarsen]
+        return c.execute(q, p + args + [int(limit)]).fetchall()
+    finally:
+        c.close()
+
+
+def buckets(path=None):
+    """Which (tod, dow) combinations actually hold data, and how much."""
+    c = _conn(path)
+    try:
+        return c.execute("SELECT tod, dow, COUNT(*), SUM(n) FROM traffic "
+                         "GROUP BY tod, dow ORDER BY tod, dow").fetchall()
     finally:
         c.close()

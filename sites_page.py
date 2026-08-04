@@ -49,6 +49,11 @@ SITES_HTML = r"""<!DOCTYPE html>
          color:#6b8ba8}
  .bar{height:10px;width:180px;border-radius:5px;
       background:linear-gradient(90deg,#0d2137,#1b5e8f,#31a8c9,#7fe0a8,#ffd166)}
+ select{background:#050b16;border:1px solid #1e3a5f;color:#dbeafe;padding:7px 9px;
+        border-radius:6px;font:inherit}
+ #sky{width:100%;height:520px;border-radius:8px;border:1px solid #14283f;
+      background:#03070e;display:block;margin-top:10px;touch-action:none}
+ .hint{font-size:11px;color:#5b7a96;margin-top:6px}
 </style></head><body>
 <header>
  <h1>◎ Site finder</h1>
@@ -72,6 +77,25 @@ SITES_HTML = r"""<!DOCTYPE html>
    <button class="btn" id="hereBtn" onclick="useHome()">USE MY SITE</button>
   </div>
   <div id="result" style="margin-top:16px"></div>
+ </div>
+
+ <div class="panel">
+  <h2>The sky from here</h2>
+  <div class="row">
+   <div><label>Time of day</label><select id="tod"></select></div>
+   <div><label>Days</label><select id="dow">
+     <option value="">All days</option><option value="0">Weekdays</option>
+     <option value="1">Weekends</option></select></div>
+   <div><label>Height ×<span id="exv">6</span></label>
+     <input id="ex" type="range" min="1" max="20" value="6" style="width:130px"></div>
+   <button class="btn" id="skyBtn" onclick="drawSky()">SHOW TRAFFIC</button>
+  </div>
+  <canvas id="sky"></canvas>
+  <div class="hint">Drag to rotate · wheel to zoom · each dot is recorded traffic,
+   brighter means busier · the gold arc is the Moon's path from these coordinates
+   over the next <span id="skyDays">30</span> days. Corridors that pierce the arc
+   are the ones that make transits.</div>
+  <div id="skyinfo" class="muted" style="margin-top:6px"></div>
  </div>
 
  <div class="panel">
@@ -189,6 +213,116 @@ async function findHotspots(){
   }catch(e){ info.innerHTML='<span style="color:#ff8080">failed: '+e+'</span>'; }
   finally{ b.disabled=false; b.textContent='MAP THE AREA'; }
 }
+// ---------- 3D sky view ----------
+// Hand-rolled rather than three.js: this is a static point cloud plus one
+// polyline, so a projection and a painter's-algorithm sort is the whole job,
+// and it keeps the page dependency-free.
+let SKY = null, rotX = -0.5, rotZ = 0.6, zoom = 1.0, drag = null;
+const cv = document.getElementById('sky');
+function fitCanvas(){
+  const r = cv.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  cv.width = r.width * d; cv.height = r.height * d;
+  return d;
+}
+function project(p, cx, cy, sc, ex){
+  // rotate about Z (compass) then X (tilt); altitude exaggerated so a 12 km
+  // ceiling is visible against an 80 km footprint
+  const cz = Math.cos(rotZ), sz = Math.sin(rotZ);
+  let x = p[0]*cz - p[1]*sz, y = p[0]*sz + p[1]*cz, z = p[2]*ex;
+  const cx2 = Math.cos(rotX), sx2 = Math.sin(rotX);
+  const y2 = y*cx2 - z*sx2, z2 = y*sx2 + z*cx2;
+  return [cx + x*sc, cy - z2*sc, y2];
+}
+function renderSky(){
+  if(!SKY) return;
+  const d = fitCanvas(), g = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  g.clearRect(0,0,W,H);
+  const ex = +document.getElementById('ex').value;
+  const sc = zoom * Math.min(W,H) / (2.2 * SKY.extent);
+  const cx = W/2, cy = H*0.60;
+
+  // ground rings every 20 km, for scale
+  g.strokeStyle = '#132a44'; g.lineWidth = 1*d;
+  for(let r=20000; r<=SKY.extent; r+=20000){
+    g.beginPath();
+    for(let a=0; a<=64; a++){
+      const t = a/64*Math.PI*2;
+      const q = project([r*Math.sin(t), r*Math.cos(t), 0], cx, cy, sc, ex);
+      a ? g.lineTo(q[0],q[1]) : g.moveTo(q[0],q[1]);
+    }
+    g.stroke();
+  }
+  // north marker
+  const npt = project([0, SKY.extent, 0], cx, cy, sc, ex);
+  g.fillStyle='#4fc3f7'; g.font=(11*d)+'px monospace'; g.fillText('N', npt[0]-4*d, npt[1]);
+  // observer
+  const o = project([0,0,0], cx, cy, sc, ex);
+  g.fillStyle='#7fd4ff'; g.beginPath(); g.arc(o[0],o[1],4*d,0,7); g.fill();
+
+  // traffic, far to near so nearer dots land on top
+  const pts = SKY.points.map(p => {
+    const q = project(p, cx, cy, sc, ex); return [q[0],q[1],q[2],p[3]];
+  }).sort((a,b)=>b[2]-a[2]);
+  const mx = SKY.maxw || 1;
+  for(const p of pts){
+    const f = Math.min(1, Math.log1p(p[3])/Math.log1p(mx));
+    g.fillStyle = `rgba(${Math.round(60+195*f)},${Math.round(140+70*f)},${Math.round(230-30*f)},${0.25+0.65*f})`;
+    g.beginPath(); g.arc(p[0], p[1], (0.9+2.2*f)*d, 0, 7); g.fill();
+  }
+  // the Moon's path
+  if(SKY.arc && SKY.arc.length){
+    g.strokeStyle='#ffd166'; g.lineWidth=2*d; g.beginPath();
+    let started=false;
+    for(const a of SKY.arc){
+      const q = project(a, cx, cy, sc, ex);
+      started ? g.lineTo(q[0],q[1]) : (g.moveTo(q[0],q[1]), started=true);
+    }
+    g.stroke();
+  }
+}
+cv.addEventListener('pointerdown', e=>{ drag={x:e.clientX,y:e.clientY}; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointerup', ()=> drag=null);
+cv.addEventListener('pointermove', e=>{
+  if(!drag) return;
+  rotZ += (e.clientX-drag.x)*0.008;
+  rotX = Math.max(-1.5, Math.min(0.2, rotX + (e.clientY-drag.y)*0.006));
+  drag={x:e.clientX,y:e.clientY}; renderSky();
+});
+cv.addEventListener('wheel', e=>{ e.preventDefault();
+  zoom = Math.max(0.3, Math.min(6, zoom * (e.deltaY>0?0.9:1.1))); renderSky(); },
+  {passive:false});
+document.getElementById('ex').addEventListener('input', e=>{
+  document.getElementById('exv').textContent = e.target.value; renderSky(); });
+window.addEventListener('resize', renderSky);
+
+async function drawSky(){
+  const b=document.getElementById('skyBtn'), info=document.getElementById('skyinfo');
+  b.disabled=true; b.textContent='LOADING…';
+  document.getElementById('skyDays').textContent = document.getElementById('days').value;
+  try{
+    const p = Object.assign(body(), {tod:document.getElementById('tod').value,
+                                     dow:document.getElementById('dow').value});
+    const r = await (await fetch('/api/sites/cloud',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(p)})).json();
+    if(!r.ok){ info.innerHTML='<span style="color:#ff8080">'+r.info+'</span>'; return; }
+    SKY = {points:r.points, arc:r.arc, extent:r.extent_m||80000,
+           maxw:r.max_weight||1};
+    renderSky();
+    info.textContent = `${r.points.length.toLocaleString()} traffic points`
+      + (r.arc.length ? ` · ${r.arc.length} Moon samples` : ' · Moon path unavailable')
+      + ` · showing ${r.shown_of.toLocaleString()} of ${r.total_bins.toLocaleString()} stored bins`;
+  }catch(e){ info.innerHTML='<span style="color:#ff8080">failed: '+e+'</span>'; }
+  finally{ b.disabled=false; b.textContent='SHOW TRAFFIC'; }
+}
+(function todOptions(){
+  const sel=document.getElementById('tod');
+  sel.innerHTML='<option value="">Any time</option>';
+  for(let i=0;i<8;i++){
+    const a=String(i*3).padStart(2,'0'), z=String(i*3+3).padStart(2,'0');
+    sel.innerHTML += `<option value="${i}">${a}:00 – ${z}:00</option>`;
+  }
+})();
 dbstat();
 </script></body></html>
 """

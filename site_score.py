@@ -100,6 +100,49 @@ def moon_track(engine, observer_cls, lat, lon, alt_m, t0, days, step_s,
     return az, el, tod, up_hours
 
 
+def moon_arc(engine, observer_cls, lat, lon, alt_m, days, step_s, min_elev,
+              hours_per_bucket, radius_m=60000.0, tod=None):
+    """The Moon's path as points in the same space as the traffic cloud.
+
+    Drawn at a fixed radius because the Moon is effectively at infinity: what
+    matters on screen is the DIRECTION, and putting the arc among the aircraft
+    is what makes a site's score obvious at a glance -- corridors that pierce
+    the arc are the ones that produce transits.
+    """
+    az, el, mtod, _hrs = moon_track(engine, observer_cls, lat, lon, alt_m,
+                                    time.time(), days, step_s, min_elev,
+                                    hours_per_bucket)
+    if not len(az):
+        return []
+    if tod is not None and tod != "":
+        keep = mtod == int(tod)
+        az, el, mtod = az[keep], el[keep], mtod[keep]
+        if not len(az):
+            return []
+    a, e = np.radians(az), np.radians(el)
+    ce = np.cos(e)
+    return [[round(float(x), 1), round(float(y), 1), round(float(z), 1), int(t)]
+            for x, y, z, t in zip(radius_m * ce * np.sin(a),
+                                  radius_m * ce * np.cos(a),
+                                  radius_m * np.sin(e), mtod)]
+
+
+def cloud_points(rows, site_lat, site_lon, site_alt_m, bin_deg, bin_ft):
+    """Traffic bins as ENU metres from the site, plus their weight."""
+    if not rows:
+        return []
+    a = np.asarray(rows, dtype=np.float64)
+    lat = (a[:, 0] + 0.5) * bin_deg
+    lon = (a[:, 1] + 0.5) * bin_deg
+    alt = (a[:, 2] + 0.5) * bin_ft * FT
+    n = a[:, 3]
+    p = _ecef(lat, lon, alt) - _ecef(np.array([site_lat]), np.array([site_lon]),
+                                     np.array([site_alt_m]))[0]
+    enu = p @ _enu_basis(site_lat, site_lon).T
+    return [[round(float(e), 1), round(float(nn), 1), round(float(u), 1), int(w)]
+            for e, nn, u, w in zip(enu[:, 0], enu[:, 1], enu[:, 2], n)]
+
+
 def score_site(engine, observer_cls, lat, lon, alt_m, cfg, days=30,
                step_s=120.0, min_elev=15.0, radius_deg=0.35, rows=None):
     """Expected transits per hour of usable Moon, for one candidate site.
@@ -111,7 +154,7 @@ def score_site(engine, observer_cls, lat, lon, alt_m, cfg, days=30,
     bin_ft = float(cfg.get("traffic_bin_ft", 500.0))
     hpb = int(cfg.get("traffic_hours_per_bucket", 3))
     if rows is None:
-        rows = traffic_db.load_bins()
+        rows = traffic_db.load_bins(tod=cfg.get("_tod"), dow=cfg.get("_dow"))
     if not rows:
         return {"ok": False, "info": "no traffic recorded yet"}
 
