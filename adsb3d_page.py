@@ -126,6 +126,7 @@ ADSB3D_HTML = r"""<!DOCTYPE html>
   <div class="sp"></div>
   <a class="btn" href="/adsb">🗺 2D MAP</a>
   <a class="btn" href="/lunar">🌕 LUNAR</a>
+  <a class="btn" href="/sites">◎ SITES</a>
   <a class="btn" href="/">📡 RF</a>
 </header>
 <div id="bl">

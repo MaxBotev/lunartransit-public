@@ -430,6 +430,17 @@ def create_app(state):
             eng.log_event("sync", "sync refused: %s" % e, ok=False)
             return jsonify({"ok": False, "info": str(e)})
 
+    @app.route("/sites")
+    def sites_page():
+        """Score observing locations against recorded traffic. On demand only:
+        the analysis is heavy and must never compete with a live session."""
+        import sites_page as sp
+        c = state.lunar.cfg() if state.lunar else {}
+        return Response(sp.SITES_HTML
+                        .replace("__LAT__", "%.4f" % c.get("home_lat", 0.0))
+                        .replace("__LON__", "%.4f" % c.get("home_lon", 0.0)),
+                        mimetype="text/html")
+
     @app.route("/api/lunar/find-moon", methods=["POST"])
     def api_find_moon():
         """Spiral-search for the Moon, then centre and sync.

@@ -7,9 +7,21 @@ against every recorded traffic bin, which is far too heavy to run during a
 session, so it happens when this page asks for it and not before.
 """
 
-PAGE = r"""
-<!-- LunarTransit site finder -->
+SITES_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Site finder — LunarTransit</title>
 <style>
+ *{box-sizing:border-box}
+ body{margin:0;background:#050b16;color:#dbeafe;
+      font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+ a{color:#7fd4ff;text-decoration:none}
+ header{display:flex;align-items:center;gap:16px;padding:14px 18px;
+        border-bottom:1px solid #14283f;background:#081120;flex-wrap:wrap}
+ header h1{margin:0;font-size:14px;letter-spacing:.18em;color:#4fc3f7;
+           text-transform:uppercase;font-weight:600}
+ header nav{display:flex;gap:14px;font-size:12px;letter-spacing:.08em;
+            text-transform:uppercase}
  .wrap{max-width:1100px;margin:0 auto;padding:18px}
  .panel{background:#0b1220;border:1px solid #1e3a5f;border-radius:10px;
         padding:16px;margin-bottom:16px}
@@ -37,7 +49,11 @@ PAGE = r"""
          color:#6b8ba8}
  .bar{height:10px;width:180px;border-radius:5px;
       background:linear-gradient(90deg,#0d2137,#1b5e8f,#31a8c9,#7fe0a8,#ffd166)}
-</style>
+</style></head><body>
+<header>
+ <h1>◎ Site finder</h1>
+ <nav><a href="/lunar">Lunar</a><a href="/adsb3d">3D map</a></nav>
+</header>
 <div class="wrap">
  <div class="panel">
   <h2>Traffic database</h2>
@@ -47,8 +63,8 @@ PAGE = r"""
  <div class="panel">
   <h2>Score a site</h2>
   <div class="row">
-   <div><label>Latitude</label><input id="lat" placeholder="37.2550"></div>
-   <div><label>Longitude</label><input id="lon" placeholder="-122.0000"></div>
+   <div><label>Latitude</label><input id="lat" value="__LAT__"></div>
+   <div><label>Longitude</label><input id="lon" value="__LON__"></div>
    <div><label>Altitude m</label><input id="alt" value="30" style="width:90px"></div>
    <div><label>Days ahead</label><input id="days" value="30" style="width:90px"></div>
    <div><label>Min Moon el°</label><input id="minel" value="15" style="width:90px"></div>
@@ -174,5 +190,5 @@ async function findHotspots(){
   finally{ b.disabled=false; b.textContent='MAP THE AREA'; }
 }
 dbstat();
-</script>
+</script></body></html>
 """
