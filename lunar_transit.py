@@ -271,6 +271,9 @@ DEFAULTS = {
     # bright rather than the Moon being elsewhere -- so pull gain down on the
     # sky reading alone, without needing a disc to measure.
     "gain_sky_ceiling": 60.0,
+    "gain_rush_factor": 3.0,        # bigger steps while the frame is clipped
+    "gain_interval_s": 300.0,       # how often the narrow keeper spends a frame
+                                    # on exposure (it takes none for pointing)
     # Exposure is the second stage, used only once gain has railed. Shortening
     # is free and sharpens the silhouette; LENGTHENING smears it, so it is
     # capped. At 1.21 arcsec/px a 250 kt aircraft at 3 km streaks 73 px at

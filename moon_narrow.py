@@ -31,7 +31,7 @@ not on the Moon at all. So a sync is a precondition here, not an optimisation.
 import math
 import time
 
-from meridian_flip import FlipError, _kv, _talk
+from meridian_flip import FlipError, Keeper, _kv, _talk
 
 
 class NarrowKeeper:
@@ -46,6 +46,14 @@ class NarrowKeeper:
         self.busy = False
         self.corrections = 0
         self._warned_region = False
+        # Dead reckoning needs no pictures, which is the whole point -- but it
+        # means nothing here ever measures the sky, and the exposure loop lives
+        # on the image-based keeper. Left as it was, auto_gain would silently do
+        # nothing at 2350 mm: enabled in config, wired up, never called. So one
+        # frame is grabbed on a slow cadence purely for its brightness, and the
+        # existing, tested gain machinery is reused rather than reimplemented.
+        self.gain = Keeper(cfg, engine, log)
+        self.last_gain = 0.0
 
     def say(self, text, **kw):
         self.log("narrow", text, **kw)
@@ -57,6 +65,30 @@ class NarrowKeeper:
         if self.busy or capture_active or moon_el < min_elev:
             return False
         return now - self.last >= float(self.cfg.get("narrow_interval_s", 120.0))
+
+    def check_gain(self, now):
+        """One frame, for exposure only. Never for pointing.
+
+        With the disc overfilling the frame there is no sky in it, so `sky` is
+        dark lunar terrain rather than background -- but `peak` is still the
+        brightest surface in view, and keeping that off the clipping point is
+        what the loop is actually for.
+        """
+        if not self.cfg.get("auto_gain"):
+            return
+        every = float(self.cfg.get("gain_interval_s", 300.0))
+        if now - self.last_gain < every:
+            return
+        self.last_gain = now
+        try:
+            reply = self.cmd("MOONPOS", timeout=120.0)
+        except FlipError as e:
+            self.gain.full = self.cfg
+            self.gain.bright_sky_gain(e)      # a blown-out frame still steers it
+            return
+        self.gain.full = self.cfg
+        self.gain.f.last_reply = reply
+        self.gain.auto_gain(now)
 
     def tick(self, now):
         """One correction. Costs two round trips and no frames at all."""
@@ -111,6 +143,10 @@ class NarrowKeeper:
             self.say("correction failed: %s" % e, ok=False)
         finally:
             self.busy = False
+        try:
+            self.check_gain(now)
+        except Exception as e:
+            self.say("exposure check failed: %s" % e, ok=False)
 
 
     def aim_offset(self, now):

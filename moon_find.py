@@ -169,6 +169,23 @@ class Finder(Flipper):
                             "deg working limit — nothing up there to find"
                             % (el, floor))
 
+        # A spiral search is a disc-finding routine: it recognises the Moon by
+        # measuring its edge. When the disc overfills the frame there is no
+        # edge, every tile looks the same, and the default 0.6 deg step is over
+        # twice the whole field -- it would step across the Moon without ever
+        # registering it, moving the mount for the full time budget and leaving
+        # it somewhere arbitrary. Refuse, and say what to do instead.
+        try:
+            import optics
+            if optics.is_narrow(self.cfg):
+                raise FlipError(
+                    "the Moon overfills the frame on this telescope, so a disc "
+                    "search cannot recognise it -- refusing rather than moving "
+                    "the mount blind. Centre the Moon by hand and press SYNC; "
+                    "dead reckoning takes over from there")
+        except ImportError:
+            pass
+
         why = rig_busy(self.host, self.port,
                        float(self.cfg.get("focus_settle_s", 30.0)))
         if why:

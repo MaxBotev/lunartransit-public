@@ -412,6 +412,24 @@ class Flipper:
         except FlipError as e:
             if not _looks_empty(e):
                 raise
+            try:
+                import optics
+                narrow = optics.is_narrow(self.full)
+            except Exception:
+                narrow = False
+            if narrow:
+                # No disc in the frame means no way to measure the new side's
+                # error, and no search can find a target it cannot recognise.
+                # Stop here with the mount tracking and the flip intact -- that
+                # is recoverable in thirty seconds by hand, where a blind
+                # search is not.
+                raise FlipError(
+                    "flip completed and the mount is tracking, but the Moon is "
+                    "not in the frame -- expected, because the pointing error "
+                    "reverses across the meridian and this telescope cannot "
+                    "see the whole disc to correct itself. Centre the Moon by "
+                    "hand and press SYNC MOUNT TO MOON; everything else "
+                    "resumes automatically")
             self.say("the Moon is not in the frame after the flip (expected — "
                      "the pointing error reverses across the meridian); "
                      "searching for it")
@@ -536,6 +554,36 @@ def last_focus(host):
         except (TypeError, ValueError):
             return None
     return num(d.get("pos")), num(d.get("temp"))
+
+
+MODIFIER_WORDS = ("shift", "offset", "auto", "target", "limit", "balance")
+
+
+def pick_control(reply, want):
+    """The control actually named `want`, not merely containing it.
+
+    This camera lists "Exposure/Gain Shift" -- a -6..+6 trim -- alongside the
+    real "Gain" and "Exposure", and a substring match hits it for BOTH names.
+    Live, that made the loop read gain 480 as "at its minimum" and then read
+    the trim's -6..+6 range as the exposure limits. Two wrong controls, one
+    wrong rule. An exact name wins; a partial match must not look like a
+    modifier of something else.
+    """
+    blocks = []
+    for block in reply[3:].split("|"):
+        got = dict(kv.split("=", 1) for kv in block.strip().split(";")
+                   if "=" in kv)
+        if got.get("name"):
+            blocks.append(got)
+    w = want.strip().lower()
+    for g in blocks:
+        if g["name"].strip().lower() == w:
+            return g
+    for g in blocks:
+        n = g["name"].lower()
+        if w in n and not any(x in n for x in MODIFIER_WORDS):
+            return g
+    return None
 
 
 def _num(d, keys, default=0.0):
@@ -867,12 +915,11 @@ class Keeper:
                           "CTRLS " + want, timeout=30.0)
         except Exception:
             return None
-        for block in reply[3:].split("|"):
-            got = dict(p.split("=", 1) for p in block.strip().split(";")
-                       if "=" in p)
-            if want.lower() in got.get("name", "").lower():
-                return got
-        return None
+        return pick_control(reply, want)
+
+    @staticmethod
+    def _pick(reply, want):
+        return pick_control(reply, want)
 
     @staticmethod
     def _exposure_to_seconds(unit):
@@ -999,12 +1046,8 @@ class Keeper:
                        if "=" in kv)
             if got.get("name"):
                 blocks.append(got)
-        exact = [g for g in blocks if g["name"].strip().lower() == "gain"]
-        loose = [g for g in blocks if "gain" in g["name"].lower()
-                 and not any(w in g["name"].lower()
-                             for w in ("shift", "offset", "auto", "target"))]
-        for got in exact + loose:
-            if True:
+        got = pick_control(reply, "gain")
+        for _one in ([got] if got else []):
                 self._gain_ctl = got["name"]
                 self._gain_lo = _num(got, ("MinValue", "Minimum", "Min"), 0.0)
                 self._gain_hi = _num(got, ("MaximumValue", "MaxValue",
@@ -1046,7 +1089,14 @@ class Keeper:
         # Did the LAST adjustment actually do anything?
         if self._gain_pending is not None:
             moved = peak - self._gain_pending
-            if abs(moved) < 2.0:
+            # A peak pinned at the top of the range is SATURATED, not
+            # unresponsive: it physically cannot move until the gain drops
+            # below the clipping point, which may take several steps. Counting
+            # that as evidence of a dead control disabled the loop three steps
+            # into a descent that was working -- observed live going 520 -> 488
+            # -> 456 -> 424 with peak stuck at 255 the whole way.
+            saturated = peak >= 254.0
+            if abs(moved) < 2.0 and not saturated:
                 self._gain_deaf += 1
                 if self._gain_deaf >= 3:
                     self._gain_ok = False
@@ -1067,6 +1117,11 @@ class Keeper:
             return
         span = max(1.0, self._gain_hi - self._gain_lo)
         step = span * float(self.full.get("gain_step_frac", 0.05))
+        # Clipped frames say nothing about HOW far out of range they are, so
+        # small steps crawl. Move faster while saturated, and settle down once
+        # the peak is back on the scale and can be measured against.
+        if peak >= 254.0 or peak <= 1.0:
+            step *= float(self.full.get("gain_rush_factor", 3.0))
         got = self._read_ctrl(name)
         if got is None or "Value" not in got:
             self._say("could not read the current gain", ok=False)
