@@ -122,6 +122,12 @@ class NarrowKeeper:
         across a night, which at this scale is several frame widths.
         """
         mode = str(self.cfg.get("aim_mode") or "centre").lower()
+        if mode == "transit":
+            aim = getattr(self.engine, "_transit_aim", None)
+            if aim and now < aim["until"]:
+                return (aim["east"], aim["north"],
+                        "where %s crosses" % aim["flight"])
+            return 0.0, 0.0, "the Moon's centre"
         if mode != "region":
             return 0.0, 0.0, "the Moon's centre"
         lat = self.cfg.get("aim_region_lat")

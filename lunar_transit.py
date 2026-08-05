@@ -573,6 +573,7 @@ class LunarTransitEngine:
         self._last_lost_search = 0.0
         self.traffic = None         # lazily built recorder
         self._narrow = None         # dead-reckoning keeper for long focal lengths
+        self._transit_aim = None    # where on the disc the next crossing lands
         self._last_aircraft = []
         self._acquire_checked = 0.0
         self.horizon = None         # local-horizon profile [(az, alt), ...]
@@ -1073,6 +1074,9 @@ class LunarTransitEngine:
         except Exception:
             narrow = False
         if narrow:
+            # Deliberately NOT gated on capture_pending: the whole point is to
+            # move the frame during the armed window, before REC fires. It is
+            # still refused once recording has actually begun.
             self.check_keeper_narrow(cfg, moon, now)
             return
 
@@ -1119,6 +1123,64 @@ class LunarTransitEngine:
             threading.Thread(
                 target=k.tick, args=(now, moon["el"], cfg["lunar_min_elev_deg"]),
                 name="moon-keeper", daemon=True).start()
+
+    def set_transit_aim(self, cfg, r, now):
+        """Remember where on the disc this crossing happens, so the narrow
+        keeper can put the frame there before the recording starts.
+
+        Only for a frame that cannot hold the whole Moon: on the Askar the
+        crossing is already in view and moving the mount would be pure risk.
+        """
+        if str(cfg.get("aim_mode") or "").lower() != "transit":
+            return
+        try:
+            import optics
+            if not optics.is_narrow(cfg):
+                return
+            import aim_transit
+            obs = Observer(cfg["home_lat"], cfg["home_lon"], cfg["home_alt_m"])
+            got = aim_transit.crossing_offset(self, obs, r, cfg)
+        except Exception as e:
+            self.log_event("aim", "could not work out the crossing point: %s"
+                           % e, ok=False)
+            return
+        if not got:
+            return
+        e_as, n_as, info = got
+        prev = self._transit_aim
+        # A nearer target wins: the frame can only be in one place, and the
+        # sooner crossing is the one about to be recorded.
+        if prev and prev["tca"] < info["tca_unix"] and prev["until"] > now:
+            return
+        # Say it once. This runs every tick for as long as the target stays in
+        # the transit list, and an unchanged aim repeated sixty times a minute
+        # buries everything else -- the same way the recovery escalation did.
+        quiet = bool(prev and prev.get("flight") == info["flight"]
+                     and math.hypot(prev["east"] - e_as,
+                                    prev["north"] - n_as) < 30.0)
+        self._transit_aim = {
+            "east": e_as, "north": n_as, "tca": info["tca_unix"],
+            "until": info["tca_unix"] + float(cfg.get("capture_post_s", 20.0)) + 15.0,
+            "flight": info["flight"],
+        }
+        # Act on it now rather than at the next scheduled pass. The keeper runs
+        # every two minutes; a transit is announced about ninety seconds ahead,
+        # so waiting for the cadence means the frame is still on the disc
+        # centre when REC fires. Observed exactly that on the first simulated
+        # run: aim set at 01:32:37, next pass not due until 01:34:32, transit
+        # at 01:33:36.
+        if self._narrow is not None and not quiet:
+            self._narrow.last = 0.0
+        if quiet:
+            return
+        self.log_event("aim", "%s crosses %.0f arcsec from the disc centre "
+                              "(%.0f%% of the radius%s) — framing there %.0fs "
+                              "ahead" % (info["flight"], info["offset_arcsec"],
+                                         100 * info["offset_frac_of_radius"],
+                                         ", clamped to the limb" if info["clamped"]
+                                         else "",
+                                         info["tca_unix"] - now),
+                       **{k: info[k] for k in ("offset_arcsec", "az", "el")})
 
     def check_keeper_narrow(self, cfg, moon, now):
         """Keeper for a telescope where the Moon overfills the frame."""
@@ -1343,6 +1405,8 @@ class LunarTransitEngine:
                 "eta_s": round(t_min, 1),
                 "tca_unix": float(now + t_min),
                 "lag_s": round(lag, 1),
+                # kept for the transit aim, which re-projects the track to TCA
+                "_ac": a, "_now": now,
                 "baro_only": bool(a.get("baro_only")),
                 "sigma_deg": round(sigma, 3),
                 "transit": bool(min_sep <= transit_deg),
@@ -1442,6 +1506,7 @@ class LunarTransitEngine:
             if r["transit"]:
                 self.capture.arm(r["hex"], r["tca_unix"],
                                  cfg["capture_pre_s"], cfg["capture_post_s"])
+                self.set_transit_aim(cfg, r, now)
                 if "transit" not in st:
                     st["transit"] = now
                     self.log_event("transit",
@@ -1463,6 +1528,7 @@ class LunarTransitEngine:
                 if cfg.get("capture_on_possible", True):
                     self.capture.arm(r["hex"], r["tca_unix"],
                                      cfg["capture_pre_s"], cfg["capture_post_s"])
+                    self.set_transit_aim(cfg, r, now)
                 if "possible" not in st and "transit" not in st:
                     st["possible"] = now
                     self.log_event("possible",
